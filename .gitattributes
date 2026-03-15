@@ -6,4 +6,9 @@ models/*.pt filter=lfs diff=lfs merge=lfs -text
 models/*.pth filter=lfs diff=lfs merge=lfs -text
 models/*.onnx filter=lfs diff=lfs merge=lfs -text
 outputs/**/*.csv filter=lfs diff=lfs merge=lfs -text
+dist/**/*.dll filter=lfs diff=lfs merge=lfs -text
+dist/**/*.exe filter=lfs diff=lfs merge=lfs -text
+dist/**/*.pyd filter=lfs diff=lfs merge=lfs -text
+dist/**/*.pyz filter=lfs diff=lfs merge=lfs -text
+dist/**/*.pkg filter=lfs diff=lfs merge=lfs -text
 templates/Output/*.exe filter=lfs diff=lfs merge=lfs -text

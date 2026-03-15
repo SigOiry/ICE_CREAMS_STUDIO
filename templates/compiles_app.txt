@@ -1,0 +1,209 @@
+# Build ICE CREAMS Studio desktop bundle with Flet/PyInstaller.
+# Run from repository root in PowerShell.
+
+$appName = "ICE_CREAMS_Studio"
+$entryScript = "ice_creams_ui.py"
+$logoCandidates = @(
+  "icons\Icecream logo.png",
+  "icons\Icecream logo-01.png"
+)
+$pythonCandidates = @(
+  ".\.venv-build\Scripts\python.exe",
+  "$env:USERPROFILE\miniconda3\envs\ICE_CREAMS\python.exe",
+  "$env:USERPROFILE\anaconda3\envs\ICE_CREAMS\python.exe"
+)
+
+$venvPython = $pythonCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $venvPython) {
+  $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+  if ($pythonCmd) { $venvPython = $pythonCmd.Source }
+}
+if (-not $venvPython) { throw "Missing build Python. Expected .venv-build or Conda env ICE_CREAMS." }
+if (!(Test-Path $entryScript)) { throw "Missing entry script: $entryScript" }
+$sourceLogoPath = $logoCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $sourceLogoPath) {
+  $latestLogo = Get-ChildItem -Path "icons" -Filter "*.png" -File -ErrorAction SilentlyContinue `
+    | Sort-Object LastWriteTime -Descending `
+    | Select-Object -First 1
+  if ($latestLogo) { $sourceLogoPath = $latestLogo.FullName }
+}
+if (-not $sourceLogoPath) { throw "Missing app icon PNG in icons folder." }
+
+# Prepare icon + splash assets in temp.
+# Icon: square transparent padding to preserve logo aspect ratio in .ico conversion.
+# Splash: binary alpha to avoid magenta fringe from Tk transparentcolor keying.
+$preparedIconPath = Join-Path $env:TEMP "ice_creams_icon_square.png"
+$preparedSplashPath = Join-Path $env:TEMP "ice_creams_splash_clean.png"
+@'
+from PIL import Image
+import os
+import sys
+
+src = sys.argv[1]
+icon_dst = sys.argv[2]
+splash_dst = sys.argv[3]
+img = Image.open(src).convert("RGBA")
+w, h = img.size
+
+side = max(w, h)
+icon_canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+icon_canvas.paste(img, ((side - w) // 2, (side - h) // 2), img)
+
+alpha = img.split()[-1]
+binary_alpha = alpha.point(lambda v: 255 if v >= 250 else 0)
+splash_img = img.copy()
+splash_img.putalpha(binary_alpha)
+
+os.makedirs(os.path.dirname(icon_dst) or ".", exist_ok=True)
+os.makedirs(os.path.dirname(splash_dst) or ".", exist_ok=True)
+icon_canvas.save(icon_dst, "PNG")
+splash_img.save(splash_dst, "PNG")
+print(icon_dst)
+print(splash_dst)
+'@ | & $venvPython - $sourceLogoPath $preparedIconPath $preparedSplashPath
+
+$iconPath = $preparedIconPath
+$splashPath = $preparedSplashPath
+if (!(Test-Path $iconPath)) { throw "Missing prepared app icon: $iconPath" }
+if (!(Test-Path $splashPath)) { throw "Missing prepared splash image: $splashPath" }
+
+# Ensure previous app process does not lock bundled DLLs during rebuild.
+Get-Process -Name "ICE_CREAMS_Studio" -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 300
+
+if (!(Test-Path "models")) { throw "Missing models folder in repository root." }
+$sourceModels = Get-ChildItem -Path "models" -Filter "*.pkl" -File -ErrorAction SilentlyContinue
+if (-not $sourceModels -or $sourceModels.Count -lt 1) {
+  throw "No model files (*.pkl) found in models folder."
+}
+if (!(Test-Path "about")) { throw "Missing about folder in repository root." }
+if (!(Test-Path "about\\Info.txt")) { throw "Missing about\\Info.txt in repository root." }
+if (!(Test-Path "Data\Input\Validation")) { throw "Missing validation data folder Data\\Input\\Validation in repository root." }
+$sourceValidationTables = Get-ChildItem -Path "Data\Input\Validation" -Recurse -File -Include "*.csv","*.xlsx" -ErrorAction SilentlyContinue
+if (-not $sourceValidationTables -or $sourceValidationTables.Count -lt 1) {
+  throw "No validation tables (*.csv/*.xlsx) found in Data\\Input\\Validation."
+}
+
+Write-Host "Using build Python: $venvPython"
+
+$sitePackages = & $venvPython -c "import site; print(next(p for p in site.getsitepackages() if p.endswith('site-packages')))"
+$sysPrefix = & $venvPython -c "import sys; print(sys.prefix)"
+$protobufRuntime = Join-Path $sysPrefix "Library\\bin\\libprotobuf.dll"
+
+# Ensure native DLL directories from the selected Python environment are first
+# on PATH so PyInstaller hook discovery can import binary packages (e.g., numpy).
+$runtimePathCandidates = @(
+  $sysPrefix,
+  (Join-Path $sysPrefix "Library\\bin"),
+  (Join-Path $sysPrefix "Library\\usr\\bin"),
+  (Join-Path $sysPrefix "Scripts"),
+  (Join-Path $sysPrefix "DLLs")
+)
+$pathParts = @($env:PATH -split ';') | Where-Object { $_ -and $_.Trim() -ne "" }
+foreach ($candidate in ($runtimePathCandidates | Where-Object { Test-Path $_ } | Select-Object -Unique)) {
+  $pathParts = @($candidate) + ($pathParts | Where-Object { $_ -ne $candidate })
+}
+$env:PATH = ($pathParts | Select-Object -Unique) -join ';'
+
+$gdalCandidates = @(
+  (Join-Path $sitePackages "pyogrio\gdal_data"),
+  (Join-Path $sitePackages "rasterio\gdal_data"),
+  (Join-Path $sysPrefix "Library\share\gdal")
+)
+$projCandidates = @(
+  (Join-Path $sitePackages "pyogrio\proj_data"),
+  (Join-Path $sitePackages "pyproj\proj_dir\share\proj"),
+  (Join-Path $sysPrefix "Library\share\proj")
+)
+$gdalPluginCandidates = @(
+  (Join-Path $sysPrefix "Library\lib\gdalplugins"),
+  (Join-Path $sitePackages "osgeo\plugins")
+)
+
+$gdalData = $gdalCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$projData = $projCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$gdalPlugins = $gdalPluginCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+if (-not $gdalData) { throw "Could not find GDAL data in site-packages." }
+if (-not $projData) { throw "Could not find PROJ data in site-packages." }
+if (-not $gdalPlugins) { throw "Could not find GDAL plugins directory (gdalplugins)." }
+
+& $venvPython -m flet.cli pack -D $entryScript `
+  --name $appName `
+  --icon $iconPath `
+  --debug-console off `
+  --pyinstaller-build-args="--splash=$splashPath" `
+  --hidden-import rasterio.sample `
+  --hidden-import rasterio._io `
+  --hidden-import rasterio._base `
+  --hidden-import rasterio.serde `
+  --hidden-import rasterio.crs `
+  --hidden-import rasterio.vrt `
+  --hidden-import pyogrio `
+  --hidden-import pyogrio._geometry `
+  --hidden-import fiona `
+  --hidden-import xarray `
+  --hidden-import rioxarray `
+  --hidden-import dask `
+  --hidden-import dask.array `
+  --hidden-import geopandas `
+  --hidden-import fastai.tabular.all `
+  --hidden-import openpyxl `
+  --hidden-import pandas._libs.window.aggregations `
+  --hidden-import pandas._libs.groupby `
+  --add-data "models;models" `
+  --add-data "about;about" `
+  --add-data "Data\Input\Validation;Data\Input\Validation" `
+  --add-data "icons;icons" `
+  --add-data "$gdalData;gdal_data" `
+  --add-data "$projData;proj_data" `
+  --add-data "$gdalPlugins;gdalplugins" `
+  -y
+
+$distRoot = Join-Path "dist" $appName
+$exePath = Join-Path $distRoot "$appName.exe"
+$bundledProtobuf = Join-Path $distRoot "_internal\\libprotobuf.dll"
+
+# PyInstaller can bundle an incompatible libprotobuf from a different dependency
+# (e.g. pyarrow), which breaks torch import at startup. Force the env runtime.
+if (Test-Path $protobufRuntime) {
+  Copy-Item $protobufRuntime $bundledProtobuf -Force
+}
+
+$bundledModels = Get-ChildItem -Path (Join-Path $distRoot "_internal\models") -Filter "*.pkl" -File -ErrorAction SilentlyContinue
+$bundledAboutInfo = Join-Path $distRoot "_internal\about\Info.txt"
+$bundledValidationTables = Get-ChildItem -Path (Join-Path $distRoot "_internal\Data\Input\Validation") -Recurse -File -Include "*.csv","*.xlsx" -ErrorAction SilentlyContinue
+$pyogrioGeometry = Get-ChildItem -Path (Join-Path $distRoot "_internal\pyogrio") -Filter "_geometry*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
+$bundledJP2Plugin = Get-ChildItem -Path (Join-Path $distRoot "_internal\gdalplugins") -Filter "gdal_JP2OpenJPEG*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+if (!(Test-Path $exePath)) { throw "Packaging failed. Missing executable: $exePath" }
+if (-not $bundledModels -or $bundledModels.Count -lt 1) {
+  throw "Packaging failed. No bundled models found in $distRoot\_internal\models"
+}
+if ($bundledModels.Count -lt $sourceModels.Count) {
+  throw "Packaging failed. Bundled model count ($($bundledModels.Count)) is lower than source model count ($($sourceModels.Count))."
+}
+if (!(Test-Path $bundledAboutInfo)) {
+  throw "Packaging failed. Missing about assets in $distRoot\\_internal\\about"
+}
+if (-not $bundledValidationTables -or $bundledValidationTables.Count -lt 1) {
+  throw "Packaging failed. No bundled validation tables found in $distRoot\\_internal\\Data\\Input\\Validation"
+}
+if ($bundledValidationTables.Count -lt $sourceValidationTables.Count) {
+  throw "Packaging failed. Bundled validation table count ($($bundledValidationTables.Count)) is lower than source validation table count ($($sourceValidationTables.Count))."
+}
+if (-not $pyogrioGeometry) { throw "Packaging failed: pyogrio._geometry was not bundled. Check hidden imports." }
+if (-not $bundledJP2Plugin) { throw "Packaging failed: gdal_JP2OpenJPEG plugin was not bundled. Check GDAL plugin data path." }
+if (!(Test-Path $bundledProtobuf)) { throw "Packaging failed: missing bundled libprotobuf runtime at $bundledProtobuf" }
+if (Test-Path $protobufRuntime) {
+  $sourcePbHash = (Get-FileHash $protobufRuntime -Algorithm SHA256).Hash
+  $bundledPbHash = (Get-FileHash $bundledProtobuf -Algorithm SHA256).Hash
+  if ($sourcePbHash -ne $bundledPbHash) {
+    throw "Packaging failed: bundled libprotobuf.dll hash does not match environment runtime."
+  }
+}
+
+Write-Host "Desktop bundle created: $exePath"
+Write-Host "Bundled models verified: $($bundledModels.Count) model(s)"
+Write-Host "Bundled validation tables verified: $($bundledValidationTables.Count) table(s)"
+Write-Host "Bundled GDAL JP2 plugin verified: $($bundledJP2Plugin.FullName)"

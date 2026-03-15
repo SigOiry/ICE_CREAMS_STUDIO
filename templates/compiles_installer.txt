@@ -1,0 +1,95 @@
+# Build ICE CREAMS Studio installer with Inno Setup (run from repo root, PowerShell).
+
+$appName = "ICE_CREAMS_Studio"
+$appDisplayName = "ICE CREAMS Studio"
+$appVersion = "1.0.0"
+$distRoot = ".\dist\$appName"
+$distExe = "$distRoot\$appName.exe"
+$issScript = ".\templates\ice_creams_installer.iss"
+$envLibprotobufCandidates = @(
+  (Join-Path $env:USERPROFILE "miniconda3\envs\ICE_CREAMS\Library\bin\libprotobuf.dll"),
+  (Join-Path $env:USERPROFILE "anaconda3\envs\ICE_CREAMS\Library\bin\libprotobuf.dll")
+)
+$envLibprotobuf = $envLibprotobufCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$bundledLibprotobuf = "$distRoot\_internal\libprotobuf.dll"
+
+if (!(Test-Path $distExe)) {
+  throw "Missing app bundle executable at $distExe. Build it first with templates\compiles_app.txt"
+}
+
+if (!(Test-Path ".\models")) {
+  throw "Missing source models folder .\models"
+}
+$sourceModels = Get-ChildItem -Path ".\models" -Filter "*.pkl" -File -ErrorAction SilentlyContinue
+$bundledModels = Get-ChildItem -Path "$distRoot\_internal\models" -Filter "*.pkl" -File -ErrorAction SilentlyContinue
+if (-not $sourceModels -or $sourceModels.Count -lt 1) {
+  throw "No source model files (*.pkl) found in .\models"
+}
+if (-not $bundledModels -or $bundledModels.Count -lt 1) {
+  throw "No bundled model files (*.pkl) found in $distRoot\_internal\models"
+}
+if ($bundledModels.Count -lt $sourceModels.Count) {
+  throw "Bundled model count ($($bundledModels.Count)) is lower than source model count ($($sourceModels.Count)). Rebuild with templates\compiles_app.txt"
+}
+if (!(Test-Path "$distRoot\_internal\about\Info.txt")) {
+  throw "Missing about assets in $distRoot\_internal\about. Rebuild with templates\compiles_app.txt"
+}
+
+if (!(Test-Path ".\Data\Input\Validation")) {
+  throw "Missing source validation folder .\Data\Input\Validation"
+}
+$sourceValidationTables = Get-ChildItem -Path ".\Data\Input\Validation" -Recurse -File -Include "*.csv","*.xlsx" -ErrorAction SilentlyContinue
+$bundledValidationTables = Get-ChildItem -Path "$distRoot\_internal\Data\Input\Validation" -Recurse -File -Include "*.csv","*.xlsx" -ErrorAction SilentlyContinue
+if (-not $sourceValidationTables -or $sourceValidationTables.Count -lt 1) {
+  throw "No source validation tables (*.csv/*.xlsx) found in .\Data\Input\Validation"
+}
+if (-not $bundledValidationTables -or $bundledValidationTables.Count -lt 1) {
+  throw "No bundled validation tables (*.csv/*.xlsx) found in $distRoot\_internal\Data\Input\Validation"
+}
+if ($bundledValidationTables.Count -lt $sourceValidationTables.Count) {
+  throw "Bundled validation table count ($($bundledValidationTables.Count)) is lower than source validation table count ($($sourceValidationTables.Count)). Rebuild with templates\compiles_app.txt"
+}
+
+if (-not (Get-ChildItem -Path "$distRoot\_internal\pyogrio" -Filter "_geometry*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+  throw "Missing pyogrio._geometry in dist bundle. Rebuild with templates\compiles_app.txt before creating installer."
+}
+
+if (-not (Get-ChildItem -Path "$distRoot\_internal\gdalplugins" -Filter "gdal_JP2OpenJPEG*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+  throw "Missing GDAL JP2OpenJPEG plugin in dist bundle. Rebuild with templates\compiles_app.txt before creating installer."
+}
+
+if (!(Test-Path $bundledLibprotobuf)) {
+  throw "Missing bundled libprotobuf runtime at $bundledLibprotobuf. Rebuild with templates\compiles_app.txt."
+}
+if (Test-Path $envLibprotobuf) {
+  $envPbHash = (Get-FileHash $envLibprotobuf -Algorithm SHA256).Hash
+  $bundledPbHash = (Get-FileHash $bundledLibprotobuf -Algorithm SHA256).Hash
+  if ($envPbHash -ne $bundledPbHash) {
+    throw "Bundled libprotobuf.dll does not match env runtime. Rebuild with templates\compiles_app.txt."
+  }
+}
+
+if (!(Test-Path $issScript)) {
+  throw "Missing Inno Setup script: $issScript"
+}
+
+$isccCandidates = @(
+  "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+  "C:\Program Files\Inno Setup 6\ISCC.exe",
+  "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+)
+$iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace($iscc)) {
+  throw "Inno Setup compiler not found. Checked: $($isccCandidates -join ', ')"
+}
+
+& $iscc `
+  "/DAppName=$appDisplayName" `
+  "/DAppVersion=$appVersion" `
+  "/DAppDirName=$appName" `
+  "/DAppExeName=$appName.exe" `
+  $issScript
+
+Write-Host "Installer compilation complete."
+Write-Host "Expected output: .\templates\Output\ICE_CREAMS_Installer_1_0_0.exe"
+Write-Host "Bundled validation tables verified: $($bundledValidationTables.Count) table(s)"

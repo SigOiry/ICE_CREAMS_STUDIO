@@ -1,0 +1,15 @@
+This algorithms as been developed in the frame of the BiCOME project founded by ESA. Simon Oiry was a PhD Student and Bede Davies a post doc. 
+This UI has been developed by Simon Oiry for the ICE CREAMS algorithm developed by Bede Davies.
+
+Link toward the algorithm : https://github.com/BedeFfinian/ICE_CREAMS
+
+Simon : 
+- Website : https://oirysimon.com
+- github : https://github.com/SigOiry
+- researchgate : www.researchgate.net/profile/Simon-Oiry
+
+Bede : 
+- Website : https://bedeffinianrowedavies.com
+- GitHub : https://github.com/BedeFfinian
+- researchGate : www.researchgate.net/profile/Bede-Davies-2
+

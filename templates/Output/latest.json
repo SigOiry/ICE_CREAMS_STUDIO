@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "app_name": "ICE CREAMS Studio",
+  "channel": "stable",
+  "version": "1.0.0",
+  "mandatory": false,
+  "published_at": "2026-03-14T14:10:38+01:00",
+  "installer_name": "ICE_CREAMS_Installer_1_0_0.exe",
+  "installer_path": "templates/Output/ICE_CREAMS_Installer_1_0_0.exe",
+  "installer_url": "https://raw.githubusercontent.com/SigOiry/ICE_CREAMS/main/templates/Output/ICE_CREAMS_Installer_1_0_0.exe",
+  "size_bytes": 331175897,
+  "sha256": "D5AE60154BEA03B86762DD4988E3A57C11E0365E1F260EF1A938844BB6C30052",
+  "release_notes_url": "https://github.com/SigOiry/ICE_CREAMS/blob/main/README.md"
+}
