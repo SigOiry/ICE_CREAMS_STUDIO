@@ -73,67 +73,6 @@ al.,* 2024a](https://www.nature.com/articles/s43247-024-01543-z.pdf) and
 [Davies *et al.,*
 2024b](https://www.sciencedirect.com/science/article/pii/S0034425724003584?via%3Dihub).
 
-## Notebook Environment Set Up (Current as of: 2026-03-16)
-
-If you want to use the original notebook-based workflow instead of the
-packaged desktop app, create a Conda environment, activate it and
-install JupyterLab with the following code:
-
-- This installs all the versions of the necessary packages for all the
-  notebooks in this repository into a virtual environment called
-  ‘ICE_CREAMS’.
-
-``` text
-conda create --name ICE_CREAMS conda-forge::fastai=2.8.4 fastcore=1.8.8 geopandas=1.1.1 rioxarray=0.18.1 dask=2025.7.0 libgdal-jp2openjpeg=3.10.3
-```
-
-- activate the environment
-
-``` text
-conda activate ICE_CREAMS
-```
-
-### Added Extras
-
-- install jupyter-lab (this can be skipped if using a different
-  GUI/reader)
-
-``` text
-conda install jupyterlab
-
-jupyter-lab
-```
-
-## Practical Use Order for the Original Notebook Workflow
-
-For any new user it is essential to create a new pickle file as
-different operating systems and different fastai versions can create
-incompatible pickle files.
-
-Therefore follow these steps fully:
-
-- train the ICE_CREAMS model using the notebook called:
-  ‘Train_TabularLearner_NN_S2_ICECREAMS.ipynb’
-
-- export trained model as .pkl file.
-
-- Test this .pkl file against the validation data in
-  ‘Apply_ICE_CREAMS_to_Labelled_Validation.ipynb’
-
-- Apply this .pkl file to a Copernicus .SAFE file with
-  ‘Apply_S2_ICECREAMS_To_SAFE_File.ipynb’ (with an accompanying
-  intertidal mask file that the user must create in the same CRS as the
-  SAFE file)
-
-## Repository Scope
-
-This repository now contains the packaged desktop UI, application
-scripts, bundled models, and supporting assets used to apply the ICE
-CREAMS model to Sentinel-2 imagery. Sentinel-2 imagery should be
-downloaded from any source in the `.SAFE` format. The model assumes
-cloud free, low tide (totally emerged) intertidal areas and is
-currently validated in Europe.
-
 ## Methods
 
 ### Neural Network Inter-Tidal Classifier
