@@ -165,15 +165,56 @@ def _manifest_string(manifest: dict[str, object], key: str) -> str:
     return str(manifest.get(key, "") or "").strip()
 
 
+def _github_lfs_binary_url(raw_url: str, *, use_media_host: bool = True) -> str:
+    """Convert a raw.githubusercontent.com URL into a URL that serves the real binary."""
+    cleaned_url = _normalise_web_url(raw_url)
+    match = re.match(
+        r"^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$",
+        cleaned_url,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+
+    owner, repo, git_ref, asset_path = match.groups()
+    if use_media_host:
+        return f"https://media.githubusercontent.com/media/{owner}/{repo}/{git_ref}/{asset_path}"
+    return f"https://github.com/{owner}/{repo}/raw/{git_ref}/{asset_path}"
+
+
+def _candidate_installer_urls(installer_url: str) -> list[str]:
+    """Return installer download URLs, including GitHub LFS-safe fallbacks when needed."""
+    primary_url = _normalise_web_url(installer_url)
+    if not primary_url:
+        return []
+
+    candidates = [primary_url]
+    for fallback_url in (
+        _github_lfs_binary_url(primary_url, use_media_host=True),
+        _github_lfs_binary_url(primary_url, use_media_host=False),
+    ):
+        if fallback_url and fallback_url not in candidates:
+            candidates.append(fallback_url)
+    return candidates
+
+
+def _looks_like_git_lfs_pointer(file_prefix: bytes) -> bool:
+    """Detect Git LFS pointer files returned instead of the real binary payload."""
+    if not file_prefix:
+        return False
+    return file_prefix.startswith(b"version https://git-lfs.github.com/spec/v1")
+
+
 def _resolve_manifest_installer_url(manifest: dict[str, object]) -> str:
     installer_url = _normalise_web_url(_manifest_string(manifest, "installer_url"))
     if installer_url:
-        return installer_url
+        github_raw_binary_url = _github_lfs_binary_url(installer_url, use_media_host=False)
+        return github_raw_binary_url or installer_url
 
     installer_path = _manifest_string(manifest, "installer_path").lstrip("/")
     if not installer_path:
         return ""
-    return f"{UPDATE_RAW_BASE_URL}/{installer_path}"
+    return f"https://github.com/{UPDATE_REPO_OWNER}/{UPDATE_REPO_NAME}/raw/{UPDATE_REPO_BRANCH}/{installer_path}"
 
 
 def _fetch_update_manifest() -> dict[str, object]:
@@ -197,34 +238,60 @@ def _download_update_installer(
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, object]:
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    request = Request(
-        installer_url,
-        headers={
-            "User-Agent": APP_USER_AGENT,
-            "Cache-Control": "no-cache",
-        },
-    )
-    hasher = hashlib.sha256()
-    bytes_downloaded = 0
-    total_bytes = 0
-    with urlopen(request, timeout=30) as response:
-        total_bytes = int(response.headers.get("Content-Length", "0") or 0)
-        with destination_path.open("wb") as installer_stream:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                installer_stream.write(chunk)
-                hasher.update(chunk)
-                bytes_downloaded += len(chunk)
-                if progress_callback is not None:
-                    progress_callback(bytes_downloaded, total_bytes)
+    download_errors: list[str] = []
 
-    return {
-        "path": str(destination_path),
-        "size_bytes": bytes_downloaded,
-        "sha256": hasher.hexdigest().upper(),
-    }
+    for candidate_url in _candidate_installer_urls(installer_url):
+        try:
+            request = Request(
+                candidate_url,
+                headers={
+                    "User-Agent": APP_USER_AGENT,
+                    "Cache-Control": "no-cache",
+                },
+            )
+            hasher = hashlib.sha256()
+            bytes_downloaded = 0
+            total_bytes = 0
+            with urlopen(request, timeout=30) as response:
+                total_bytes = int(response.headers.get("Content-Length", "0") or 0)
+                with destination_path.open("wb") as installer_stream:
+                    first_chunk = response.read(1024 * 1024)
+                    if _looks_like_git_lfs_pointer(first_chunk):
+                        raise ValueError(
+                            "The installer URL returned a Git LFS pointer file instead of the actual installer."
+                        )
+                    if first_chunk:
+                        installer_stream.write(first_chunk)
+                        hasher.update(first_chunk)
+                        bytes_downloaded += len(first_chunk)
+                        if progress_callback is not None:
+                            progress_callback(bytes_downloaded, total_bytes)
+
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        installer_stream.write(chunk)
+                        hasher.update(chunk)
+                        bytes_downloaded += len(chunk)
+                        if progress_callback is not None:
+                            progress_callback(bytes_downloaded, total_bytes)
+
+            return {
+                "path": str(destination_path),
+                "size_bytes": bytes_downloaded,
+                "sha256": hasher.hexdigest().upper(),
+            }
+        except Exception as exc:  # noqa: BLE001 - try alternate GitHub asset URLs before failing.
+            download_errors.append(f"{candidate_url} -> {exc}")
+            try:
+                destination_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    if download_errors:
+        raise ValueError(download_errors[-1])
+    raise ValueError("No installer download URL was available.")
 
 
 def _launch_windows_update_installer(installer_path: Path) -> None:
@@ -1233,16 +1300,22 @@ def main(page: ft.Page) -> None:
                                         weight=ft.FontWeight.W_700,
                                         color=LIQUID_TEXT,
                                     ),
-                                    ft.Text(
-                                        "People, project, and partners",
-                                        size=12,
-                                        color=LIQUID_SUBTEXT,
-                                    ),
-                                ],
-                            ),
-                            about_popup_close_button,
-                        ],
-                    ),
+                                     ft.Text(
+                                         "People, project, and partners",
+                                         size=12,
+                                         color=LIQUID_SUBTEXT,
+                                     ),
+                                     ft.Text(
+                                         f"App version {APP_VERSION}",
+                                         size=12,
+                                         weight=ft.FontWeight.W_600,
+                                         color=LIQUID_TEXT,
+                                     ),
+                                 ],
+                             ),
+                             about_popup_close_button,
+                         ],
+                     ),
                     ft.ResponsiveRow(
                         columns=12,
                         run_spacing=10,
