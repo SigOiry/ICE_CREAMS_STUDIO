@@ -205,6 +205,13 @@ _S2_SCENE_ID_PATTERN = re.compile(
 _ZIP_SCENE_CACHE: dict[str, tuple[int, float, list[str], bool]] = {}
 _SCENE_BATCH_CACHE_TTL_SECONDS = 30.0
 _SCENE_BATCH_CACHE: dict[str, tuple[float, tuple[str, int, int], dict[str, object]]] = {}
+_SCENE_STATUS_FOLDERS = {
+    "done": "Done",
+    "failed": "Failed",
+}
+_SCENE_STATUS_FOLDER_NAMES = {
+    folder_name.upper() for folder_name in _SCENE_STATUS_FOLDERS.values()
+}
 
 
 def _console_log(message: str, enabled: bool = True) -> None:
@@ -815,6 +822,9 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
     discovered_records: list[dict[str, str | None]] = []
     ignored_candidates: list[str] = []
     for root, dirnames, filenames in os.walk(input_path):
+        dirnames[:] = [
+            dirname for dirname in dirnames if dirname.upper() not in _SCENE_STATUS_FOLDER_NAMES
+        ]
         safe_dir_paths: list[Path] = []
         for dirname in list(dirnames):
             if dirname.upper().endswith(".SAFE"):
@@ -918,6 +928,62 @@ def discover_scene_inputs(input_scene_path: str) -> list[str]:
     return [str(scene_record["path"]) for scene_record in scene_batch_info["selected"]]
 
 
+def _scene_status_root_directory(scene_path: Path) -> Path:
+    """Resolve the parent directory that should contain Done/Failed scene folders."""
+    parent_dir = scene_path.parent
+    if parent_dir.name.upper() in _SCENE_STATUS_FOLDER_NAMES and parent_dir.parent != parent_dir:
+        return parent_dir.parent
+    return parent_dir
+
+
+def _build_unique_scene_destination(destination_dir: Path, scene_name: str) -> Path:
+    """Return a non-conflicting destination path inside a status folder."""
+    candidate_path = destination_dir / scene_name
+    if not candidate_path.exists():
+        return candidate_path
+
+    name_path = Path(scene_name)
+    suffixes = "".join(name_path.suffixes)
+    stem = scene_name[:-len(suffixes)] if suffixes else scene_name
+    for index in range(1, 10_000):
+        candidate_path = destination_dir / f"{stem}_{index}{suffixes}"
+        if not candidate_path.exists():
+            return candidate_path
+
+    raise FileExistsError(
+        f"Could not find a free destination name for {scene_name} in {destination_dir}"
+    )
+
+
+def move_scene_input_to_status_folder(input_scene_path: str | Path, status: str) -> str:
+    """Move one scene file/folder into a sibling Done/Failed directory and return the new path."""
+    normalized_status = status.strip().lower()
+    if normalized_status not in _SCENE_STATUS_FOLDERS:
+        raise ValueError(
+            f"Unsupported scene status '{status}'. Expected one of: {', '.join(_SCENE_STATUS_FOLDERS)}."
+        )
+
+    scene_path = Path(input_scene_path)
+    if not scene_path.exists():
+        raise FileNotFoundError(f"Scene input no longer exists: {scene_path}")
+
+    target_root = _scene_status_root_directory(scene_path)
+    target_dir = target_root / _SCENE_STATUS_FOLDERS[normalized_status]
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    if scene_path.parent == target_dir:
+        return str(scene_path)
+
+    target_path = _build_unique_scene_destination(target_dir, scene_path.name)
+    shutil.move(str(scene_path), str(target_path))
+
+    _SCENE_BATCH_CACHE.clear()
+    if scene_path.suffix.lower() == ".zip":
+        _ZIP_SCENE_CACHE.pop(_scene_path_cache_key(scene_path), None)
+
+    return str(target_path)
+
+
 @contextmanager
 def _prepare_s2_scene_input(
     input_scene_path: str,
@@ -946,7 +1012,23 @@ def _prepare_s2_scene_input(
         temp_dir = tempfile.mkdtemp(prefix="ice_creams_safe_")
         try:
             with zipfile.ZipFile(input_path) as archive:
-                archive.extractall(temp_dir)
+                try:
+                    archive.extractall(temp_dir)
+                except zipfile.BadZipFile as exc:
+                    raw_message = str(exc).strip()
+                    if "Bad CRC-32 for file" in raw_message:
+                        raise ValueError(
+                            "Input zip archive is corrupted or incomplete. "
+                            f"{raw_message}. "
+                            "This usually means the scene did not finish downloading or syncing locally. "
+                            "Re-download the scene, or if it is stored in a sync folder such as Nextcloud, "
+                            "make sure the zip is fully available on disk before running."
+                        ) from exc
+                    raise ValueError(
+                        "Input zip archive could not be extracted cleanly. "
+                        f"{raw_message}. "
+                        "Re-download the scene or extract it manually with a zip tool first."
+                    ) from exc
             yield _locate_safe_directory(temp_dir)
         finally:
             _cleanup_temp_dir(temp_dir, status_callback)

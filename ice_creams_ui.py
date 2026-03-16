@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -15,6 +17,7 @@ import warnings
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -25,7 +28,11 @@ try:
 except Exception:
     ftm = None
 
-from apply_ICECREAMS import classify_s2_scene, discover_scene_batch_info
+from apply_ICECREAMS import (
+    classify_s2_scene,
+    discover_scene_batch_info,
+    move_scene_input_to_status_folder,
+)
 from train_icecreams import train_model
 from validate_icecreams import (
     DEFAULT_TARGET_CLASS,
@@ -44,6 +51,17 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+APP_VERSION = "1.0.1"
+UPDATE_REPO_OWNER = "SigOiry"
+UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
+UPDATE_REPO_BRANCH = "main"
+UPDATE_MANIFEST_PATH = "templates/Output/latest.json"
+UPDATE_RAW_BASE_URL = (
+    f"https://raw.githubusercontent.com/"
+    f"{UPDATE_REPO_OWNER}/{UPDATE_REPO_NAME}/{UPDATE_REPO_BRANCH}"
+)
+UPDATE_MANIFEST_URL = f"{UPDATE_RAW_BASE_URL}/{UPDATE_MANIFEST_PATH}"
+APP_USER_AGENT = f"ICE_CREAMS_Studio/{APP_VERSION}"
 LIQUID_ACCENT = "#4F8CFF"
 LIQUID_SURFACE = "#F7FBFF"
 LIQUID_SURFACE_ALT = "#EAF3FF"
@@ -131,6 +149,126 @@ def _resolve_folder_target(path_value: str | None) -> Path | None:
         return candidate if candidate.is_dir() else candidate.parent
 
     return candidate.parent if candidate.suffix else candidate
+
+
+def _parse_version_tuple(version_value: object) -> tuple[int, ...]:
+    version_text = str(version_value or "").strip()
+    numeric_parts = [int(part) for part in re.findall(r"\d+", version_text)]
+    return tuple(numeric_parts) if numeric_parts else (0,)
+
+
+def _is_newer_version(candidate_version: object, current_version: object) -> bool:
+    return _parse_version_tuple(candidate_version) > _parse_version_tuple(current_version)
+
+
+def _manifest_string(manifest: dict[str, object], key: str) -> str:
+    return str(manifest.get(key, "") or "").strip()
+
+
+def _resolve_manifest_installer_url(manifest: dict[str, object]) -> str:
+    installer_url = _normalise_web_url(_manifest_string(manifest, "installer_url"))
+    if installer_url:
+        return installer_url
+
+    installer_path = _manifest_string(manifest, "installer_path").lstrip("/")
+    if not installer_path:
+        return ""
+    return f"{UPDATE_RAW_BASE_URL}/{installer_path}"
+
+
+def _fetch_update_manifest() -> dict[str, object]:
+    request = Request(
+        UPDATE_MANIFEST_URL,
+        headers={
+            "User-Agent": APP_USER_AGENT,
+            "Cache-Control": "no-cache",
+        },
+    )
+    with urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Update manifest is not a JSON object.")
+    return payload
+
+
+def _download_update_installer(
+    installer_url: str,
+    destination_path: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, object]:
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    request = Request(
+        installer_url,
+        headers={
+            "User-Agent": APP_USER_AGENT,
+            "Cache-Control": "no-cache",
+        },
+    )
+    hasher = hashlib.sha256()
+    bytes_downloaded = 0
+    total_bytes = 0
+    with urlopen(request, timeout=30) as response:
+        total_bytes = int(response.headers.get("Content-Length", "0") or 0)
+        with destination_path.open("wb") as installer_stream:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                installer_stream.write(chunk)
+                hasher.update(chunk)
+                bytes_downloaded += len(chunk)
+                if progress_callback is not None:
+                    progress_callback(bytes_downloaded, total_bytes)
+
+    return {
+        "path": str(destination_path),
+        "size_bytes": bytes_downloaded,
+        "sha256": hasher.hexdigest().upper(),
+    }
+
+
+def _launch_windows_update_installer(installer_path: Path) -> None:
+    if os.name != "nt":
+        raise OSError("Automatic installer launch is only supported on Windows.")
+
+    update_dir = installer_path.parent
+    update_dir.mkdir(parents=True, exist_ok=True)
+    script_path = update_dir / f"run_update_{int(time.time())}.cmd"
+    current_executable = ""
+    if getattr(sys, "frozen", False):
+        try:
+            current_executable = str(Path(sys.executable).resolve())
+        except Exception:
+            current_executable = sys.executable
+
+    script_lines = [
+        "@echo off",
+        "setlocal",
+        "timeout /t 2 /nobreak >nul",
+        f'start "" /wait "{installer_path}" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NOCANCEL /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS',
+        "set EXIT_CODE=%ERRORLEVEL%",
+        'if not "%EXIT_CODE%"=="0" exit /b %EXIT_CODE%',
+    ]
+    if current_executable:
+        script_lines.append(f'if exist "{current_executable}" start "" "{current_executable}"')
+    script_lines.extend(
+        [
+            'del "%~f0"',
+            "exit /b 0",
+        ]
+    )
+    script_path.write_text("\r\n".join(script_lines) + "\r\n", encoding="ascii")
+
+    creationflags = 0
+    for flag_name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
+        creationflags |= int(getattr(subprocess, flag_name, 0))
+
+    subprocess.Popen(
+        ["cmd.exe", "/c", str(script_path)],
+        creationflags=creationflags,
+        close_fds=True,
+        cwd=str(update_dir),
+    )
 
 
 def _glass_panel(content: ft.Control, expand: bool = False, padding: int = 24) -> ft.Container:
@@ -448,12 +586,19 @@ def main(page: ft.Page) -> None:
         "train_run_token": 0,
         "validation_run_token": 0,
     }
+    update_state = {
+        "check_running": False,
+        "install_running": False,
+        "manifest": None,
+        "status_before_check": "Ready for a new run.",
+    }
     apply_preflight_state = {
         "token": 0,
         "running": False,
         "signature": None,
         "scene_batch_info": None,
         "pending_scene_inputs": [],
+        "skipped_existing_scene_inputs": [],
         "skipped_existing_outputs": [],
     }
     history_log_path = default_apply_output_dir / "run_history.jsonl"
@@ -931,6 +1076,59 @@ def main(page: ft.Page) -> None:
         content=ft.Text("About", size=14, weight=ft.FontWeight.W_800, color="#10253B"),
     )
     about_popup_blocker = ft.Container()
+    update_popup_title = ft.Text(
+        "Update Available",
+        size=22,
+        weight=ft.FontWeight.W_700,
+        color=LIQUID_TEXT,
+    )
+    update_popup_summary = ft.Text(
+        "A newer version of ICE CREAMS Studio is ready to install.",
+        size=13,
+        color=LIQUID_SUBTEXT,
+    )
+    update_popup_details = ft.Text(
+        "-",
+        size=12,
+        color=LIQUID_SUBTEXT,
+        selectable=True,
+    )
+    update_popup_status = ft.Text(
+        "",
+        size=12,
+        color="#D6455D",
+        visible=False,
+    )
+    update_popup_close_button = ft.IconButton(
+        icon=ft.Icons.CLOSE,
+        icon_color=LIQUID_TEXT,
+        tooltip="Dismiss update prompt",
+        style=ft.ButtonStyle(
+            bgcolor=ft.Colors.with_opacity(0.52, LIQUID_SURFACE_ALT),
+            side=ft.BorderSide(1, ft.Colors.with_opacity(0.30, "#A6BFD9")),
+            shape=ft.RoundedRectangleBorder(radius=12),
+            overlay_color=ft.Colors.TRANSPARENT,
+            animation_duration=0,
+            enable_feedback=False,
+        ),
+    )
+    update_popup_later_button = ft.ElevatedButton(
+        "Later",
+        icon=ft.Icons.SCHEDULE,
+        style=_frosted_button_style("#E6F4FF", "#14324C"),
+    )
+    update_popup_install_button = ft.ElevatedButton(
+        "Update now",
+        icon=ft.Icons.SYSTEM_UPDATE_ALT,
+        style=_frosted_button_style("#D4F7E3", "#103B2F"),
+    )
+    update_popup_release_notes_button = ft.ElevatedButton(
+        "Release notes",
+        icon=ft.Icons.OPEN_IN_BROWSER,
+        style=_frosted_button_style("#FFF1D6", "#5F4500"),
+        visible=False,
+    )
+    update_popup_blocker = ft.Container()
 
     def _open_external_link(url_value: str) -> None:
         target_url = _normalise_web_url(url_value)
@@ -1861,6 +2059,7 @@ def main(page: ft.Page) -> None:
         apply_preflight_state["signature"] = None
         apply_preflight_state["scene_batch_info"] = None
         apply_preflight_state["pending_scene_inputs"] = []
+        apply_preflight_state["skipped_existing_scene_inputs"] = []
         apply_preflight_state["skipped_existing_outputs"] = []
 
     def _apply_preflight_matches_current_selection() -> bool:
@@ -1919,17 +2118,20 @@ def main(page: ft.Page) -> None:
     ) -> dict[str, object]:
         scene_batch_info = discover_scene_batch_info(input_source)
         pending_scene_inputs: list[str] = []
+        skipped_existing_scene_inputs: list[str] = []
         skipped_existing_outputs: list[str] = []
         for scene_record in scene_batch_info["selected"]:
             scene_input = str(scene_record["path"])
             scene_output = build_apply_output_path(scene_input, output_folder, selected_model)
             if scene_output and Path(scene_output).is_file():
+                skipped_existing_scene_inputs.append(scene_input)
                 skipped_existing_outputs.append(scene_output)
             else:
                 pending_scene_inputs.append(scene_input)
         return {
             "scene_batch_info": scene_batch_info,
             "pending_scene_inputs": pending_scene_inputs,
+            "skipped_existing_scene_inputs": skipped_existing_scene_inputs,
             "skipped_existing_outputs": skipped_existing_outputs,
         }
 
@@ -1965,6 +2167,7 @@ def main(page: ft.Page) -> None:
         apply_preflight_state["signature"] = current_signature
         apply_preflight_state["scene_batch_info"] = plan["scene_batch_info"]
         apply_preflight_state["pending_scene_inputs"] = list(plan["pending_scene_inputs"])
+        apply_preflight_state["skipped_existing_scene_inputs"] = list(plan["skipped_existing_scene_inputs"])
         apply_preflight_state["skipped_existing_outputs"] = list(plan["skipped_existing_outputs"])
         _set_apply_preflight_running(False)
 
@@ -2114,6 +2317,195 @@ def main(page: ft.Page) -> None:
     def close_about_popup(_: ft.ControlEvent | None = None) -> None:
         hide_about_popup()
         _refresh_ui_surface(about_popup_blocker)
+
+    def hide_update_popup() -> None:
+        if update_state["install_running"]:
+            return
+        update_popup_blocker.visible = False
+        update_popup_status.value = ""
+        update_popup_status.visible = False
+
+    def show_update_popup(
+        manifest: dict[str, object],
+        error_message: str = "",
+    ) -> None:
+        update_state["manifest"] = dict(manifest)
+        latest_version = _manifest_string(manifest, "version") or "Unknown"
+        installer_name = _manifest_string(manifest, "installer_name") or "Installer.exe"
+        published_at = _manifest_string(manifest, "published_at") or "-"
+        update_popup_summary.value = (
+            f"Version {latest_version} is available. You are currently running {APP_VERSION}."
+        )
+        update_popup_details.value = (
+            f"Current version: {APP_VERSION}\n"
+            f"Latest version: {latest_version}\n"
+            f"Installer: {installer_name}\n"
+            f"Published: {published_at}\n"
+            "Selecting 'Update now' downloads the installer from the hosted "
+            "ICE_CREAMS_STUDIO repository, closes the app, installs the update, "
+            "and relaunches the application."
+        )
+        release_notes_url = _normalise_web_url(_manifest_string(manifest, "release_notes_url"))
+        update_popup_release_notes_button.visible = bool(release_notes_url)
+        update_popup_release_notes_button.on_click = (
+            (lambda _, target=release_notes_url: _open_external_link(target))
+            if release_notes_url
+            else None
+        )
+        update_popup_status.value = error_message
+        update_popup_status.visible = bool(error_message)
+        update_popup_blocker.visible = True
+        _refresh_ui_surface(update_popup_blocker)
+
+    def close_update_popup(_: ft.ControlEvent | None = None) -> None:
+        if update_state["install_running"]:
+            return
+        hide_update_popup()
+        if not state["busy"]:
+            report_idle("Ready for a new run.")
+        _refresh_ui_surface(update_popup_blocker)
+
+    def _close_application_window() -> None:
+        try:
+            if hasattr(page, "window") and hasattr(page.window, "close"):
+                page.window.close()
+                return
+        except Exception:
+            pass
+        for closer_name in ("window_destroy", "window_close"):
+            try:
+                getattr(page, closer_name)()
+                return
+            except Exception:
+                continue
+
+    async def _run_startup_update_check() -> None:
+        if update_state["check_running"] or update_state["install_running"]:
+            return
+
+        update_state["check_running"] = True
+        previous_status = str(app_status.value or "").strip() or "Ready for a new run."
+        update_state["status_before_check"] = previous_status
+        if not state["busy"]:
+            set_app_status("busy", "Checking for application updates...")
+            request_ui_refresh(force=True)
+
+        try:
+            manifest = await asyncio.to_thread(_fetch_update_manifest)
+        except Exception:
+            if not state["busy"] and not update_popup_blocker.visible:
+                report_idle(previous_status)
+                request_ui_refresh(force=True)
+            return
+        finally:
+            update_state["check_running"] = False
+
+        latest_version = _manifest_string(manifest, "version")
+        if not latest_version or not _is_newer_version(latest_version, APP_VERSION):
+            update_state["manifest"] = None
+            if not state["busy"] and not update_popup_blocker.visible:
+                report_idle(previous_status)
+                request_ui_refresh(force=True)
+            return
+
+        if not state["busy"]:
+            set_app_status("ready", f"Version {latest_version} is available.")
+        show_update_popup(manifest)
+        request_ui_refresh(force=True)
+
+    async def run_update_install(_: ft.ControlEvent | None = None) -> None:
+        if update_state["install_running"]:
+            return
+
+        manifest = update_state.get("manifest")
+        if not isinstance(manifest, dict):
+            return
+        if state["busy"]:
+            show_update_popup(
+                manifest,
+                error_message="Wait for the current workflow to finish before starting the update.",
+            )
+            return
+
+        latest_version = _manifest_string(manifest, "version") or "Unknown"
+        installer_name = _manifest_string(manifest, "installer_name") or "ICE_CREAMS_Installer.exe"
+        installer_url = _resolve_manifest_installer_url(manifest)
+        if not installer_url:
+            show_update_popup(manifest, error_message="The update manifest does not contain a valid installer URL.")
+            return
+
+        temp_update_dir = Path(tempfile.gettempdir()) / "ICE_CREAMS_Studio" / "updates"
+        installer_path = temp_update_dir / installer_name
+        expected_hash = _manifest_string(manifest, "sha256").upper()
+        update_state["install_running"] = True
+        hide_update_popup()
+        set_global_busy(True, f"Downloading version {latest_version}.")
+        state["operation_mode"] = "update"
+        update_overlay(
+            title="Installing Update",
+            detail=f"Downloading ICE CREAMS Studio {latest_version}.",
+            progress=0,
+            counter="Preparing download",
+            job="App update",
+            source="",
+            destination=str(installer_path),
+        )
+        request_ui_refresh(force=True)
+
+        loop = asyncio.get_running_loop()
+
+        def _dispatch_update_progress(bytes_downloaded: int, total_bytes: int) -> None:
+            progress_value = 0.0
+            counter_text = "Downloading installer"
+            if total_bytes > 0:
+                progress_value = max(0.0, min(1.0, bytes_downloaded / total_bytes))
+                counter_text = (
+                    f"{bytes_downloaded / (1024 * 1024):.1f} MB of "
+                    f"{total_bytes / (1024 * 1024):.1f} MB"
+                )
+            update_overlay(
+                title="Installing Update",
+                detail=f"Downloading ICE CREAMS Studio {latest_version}.",
+                progress=progress_value,
+                counter=counter_text,
+                job="App update",
+                destination=str(installer_path),
+            )
+            request_ui_refresh()
+
+        def schedule_update_progress(bytes_downloaded: int, total_bytes: int) -> None:
+            loop.call_soon_threadsafe(_dispatch_update_progress, bytes_downloaded, total_bytes)
+
+        try:
+            download_result = await asyncio.to_thread(
+                _download_update_installer,
+                installer_url,
+                installer_path,
+                schedule_update_progress,
+            )
+            actual_hash = str(download_result.get("sha256", "")).upper()
+            if expected_hash and actual_hash != expected_hash:
+                raise ValueError("Downloaded installer hash does not match the manifest.")
+
+            update_overlay(
+                title="Installing Update",
+                detail="Launching the installer and closing the app.",
+                progress=1.0,
+                counter=f"Version {latest_version}",
+                job="App update",
+                destination=str(installer_path),
+            )
+            request_ui_refresh(force=True)
+            await asyncio.to_thread(_launch_windows_update_installer, installer_path)
+            await asyncio.sleep(0.35)
+            _close_application_window()
+        except Exception as exc:
+            update_state["install_running"] = False
+            set_global_busy(False)
+            overlay_blocker.visible = False
+            set_app_status("error", f"Update failed: {exc}")
+            show_update_popup(manifest, error_message=f"Update failed: {exc}")
+            request_ui_refresh(force=True)
 
     def hide_batch_popup() -> None:
         batch_popup_blocker.visible = False
@@ -2515,6 +2907,9 @@ def main(page: ft.Page) -> None:
     validation_popup_close_button.on_click = close_validation_popup
     history_map_popup_close_button.on_click = close_history_map_popup
     about_popup_close_button.on_click = close_about_popup
+    update_popup_close_button.on_click = close_update_popup
+    update_popup_later_button.on_click = close_update_popup
+    update_popup_install_button.on_click = run_update_install
     menu_about_button.on_click = show_about_popup
 
     def _history_string(value: object) -> str:
@@ -3490,6 +3885,7 @@ def main(page: ft.Page) -> None:
             menu_about_button,
             overlay_blocker,
             about_popup_blocker,
+            update_popup_blocker,
             batch_popup_blocker,
             validation_popup_blocker,
             history_map_popup_blocker,
@@ -3978,9 +4374,13 @@ def main(page: ft.Page) -> None:
             return
 
         scene_inputs = list(apply_preflight_state.get("pending_scene_inputs", []))
+        skipped_existing_scene_inputs = list(
+            apply_preflight_state.get("skipped_existing_scene_inputs", [])
+        )
         skipped_existing_outputs = list(apply_preflight_state.get("skipped_existing_outputs", []))
         ignored_count = int(scene_batch_info.get("ignored_count", 0))
         selected_scene_count = len(scene_batch_info.get("selected", []))
+        batch_mode = _is_batch_scene_source(input_source)
 
         hide_batch_popup()
         apply_progress.value = 0
@@ -4005,6 +4405,11 @@ def main(page: ft.Page) -> None:
         run_started_at = datetime.now()
         run_started_clock = time.monotonic()
         completed_outputs: list[str] = []
+        archived_done_inputs: list[str] = []
+        archived_failed_inputs: list[str] = []
+        failed_scene_records: list[tuple[str, str]] = []
+        archive_warnings: list[str] = []
+        single_scene_replacement_input = {"value": None}
         total_scenes = len(scene_inputs)
 
         def _is_current_apply_run(run_token: int = apply_run_token) -> bool:
@@ -4062,8 +4467,52 @@ def main(page: ft.Page) -> None:
             )
             request_ui_refresh()
 
+        def _scene_status_prefix(scene_index: int, scene_total: int = total_scenes) -> str:
+            if scene_total > 1 or batch_mode:
+                return f"[{scene_index}/{scene_total}] "
+            return ""
+
+        def _archive_scene_input(
+            scene_input: str,
+            status_key: str,
+        ) -> tuple[str | None, str | None]:
+            try:
+                archived_path = move_scene_input_to_status_folder(scene_input, status_key)
+            except FileNotFoundError:
+                return None, None
+            except Exception as exc:  # noqa: BLE001 - surface archive warnings to the user.
+                return None, str(exc)
+
+            if not batch_mode and selected_scene_count == 1:
+                single_scene_replacement_input["value"] = archived_path
+            return archived_path, None
+
+        def _cleanup_partial_scene_output(scene_output: str, scene_label: str) -> None:
+            output_path = Path(scene_output)
+            if not output_path.exists():
+                return
+            try:
+                output_path.unlink()
+            except Exception as exc:  # noqa: BLE001 - surface cleanup warnings to the user.
+                warning_message = (
+                    f"Could not remove partial output for {scene_label}: {exc}"
+                )
+                archive_warnings.append(warning_message)
+                push_apply_status(warning_message, level="warning")
+
         try:
-            batch_mode = _is_batch_scene_source(input_source)
+            for scene_input in skipped_existing_scene_inputs:
+                scene_label = _derive_scene_stem(scene_input)
+                archived_path, archive_error = _archive_scene_input(scene_input, "done")
+                if archived_path:
+                    archived_done_inputs.append(archived_path)
+                elif archive_error:
+                    warning_message = (
+                        f"Could not move already processed input {scene_label} to Done: {archive_error}"
+                    )
+                    archive_warnings.append(warning_message)
+                    push_apply_status(warning_message, level="warning")
+
             for index, scene_input in enumerate(scene_inputs, start=1):
                 scene_label = _derive_scene_stem(scene_input)
                 scene_output = build_apply_output_path(scene_input, output_folder, selected_model)
@@ -4145,45 +4594,128 @@ def main(page: ft.Page) -> None:
                         scene_output,
                     )
 
-                result = await asyncio.to_thread(
-                    classify_s2_scene,
-                    scene_input,
-                    scene_output,
-                    selected_model,
-                    apply_mask_field.value.strip(),
-                    False,
-                    schedule_apply_status,
-                    schedule_apply_progress,
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        classify_s2_scene,
+                        scene_input,
+                        scene_output,
+                        selected_model,
+                        apply_mask_field.value.strip(),
+                        False,
+                        schedule_apply_status,
+                        schedule_apply_progress,
+                    )
+                except Exception as exc:  # noqa: BLE001 - continue processing the next scene.
+                    failed_scene_records.append((scene_input, str(exc)))
+                    _cleanup_partial_scene_output(scene_output, scene_label)
+                    archived_path, archive_error = _archive_scene_input(scene_input, "failed")
+                    failure_message = f"{_scene_status_prefix(index)}Failed {scene_label}: {exc}"
+                    if archived_path:
+                        archived_failed_inputs.append(archived_path)
+                        failure_message += " Input moved to Failed."
+                    elif archive_error:
+                        warning_message = (
+                            f"Could not move failed input {scene_label} to Failed: {archive_error}"
+                        )
+                        archive_warnings.append(warning_message)
+                        push_apply_status(warning_message, level="warning")
+                        failure_message += " Input could not be moved to Failed."
+                    push_apply_status(failure_message, level="error", refresh=False)
+                    update_overlay(
+                        detail=failure_message,
+                        counter=counter_text,
+                        source=scene_input,
+                        destination=scene_output,
+                    )
+                    _dispatch_apply_progress(
+                        index / max(total_scenes, 1),
+                        counter_text,
+                        scene_input,
+                        scene_output,
+                    )
+                    request_ui_refresh()
+                    continue
+
                 completed_outputs.append(result)
+                archived_path, archive_error = _archive_scene_input(scene_input, "done")
+                if archived_path:
+                    archived_done_inputs.append(archived_path)
+                elif archive_error:
+                    warning_message = (
+                        f"Output written for {scene_label}, but the input could not be moved to Done: "
+                        f"{archive_error}"
+                    )
+                    archive_warnings.append(warning_message)
+                    push_apply_status(warning_message, level="warning")
 
             processed_count = len(completed_outputs)
             skipped_existing_count = len(skipped_existing_outputs)
-            if processed_count == 1 and skipped_existing_count == 0:
-                push_apply_status(f"Workflow finished successfully. Output written to {completed_outputs[0]}")
-            elif processed_count > 0 and skipped_existing_count == 0:
-                push_apply_status(
-                    f"Batch workflow finished successfully. {processed_count} outputs were written to {output_folder}"
+            failed_count = len(failed_scene_records)
+            done_moved_count = len(archived_done_inputs)
+            failed_moved_count = len(archived_failed_inputs)
+            apply_progress.value = 1.0
+
+            if failed_count == 0:
+                if processed_count == 1 and skipped_existing_count == 0:
+                    done_suffix = (
+                        " Input moved to Done."
+                        if done_moved_count == 1
+                        else " Input could not be moved to Done."
+                    )
+                    push_apply_status(
+                        f"Workflow finished successfully. Output written to {completed_outputs[0]}."
+                        f"{done_suffix}"
+                    )
+                elif processed_count > 0 and skipped_existing_count == 0:
+                    push_apply_status(
+                        f"Batch workflow finished successfully. {processed_count} output(s) were written to "
+                        f"{output_folder}. {done_moved_count} input(s) moved to Done."
+                    )
+                elif processed_count > 0:
+                    push_apply_status(
+                        f"Apply workflow completed. {processed_count} output(s) written, "
+                        f"{skipped_existing_count} already processed scene(s) detected, and "
+                        f"{done_moved_count} input(s) moved to Done."
+                    )
+                elif skipped_existing_count > 0:
+                    push_apply_status(
+                        "No new outputs were written. "
+                        f"{skipped_existing_count} scene(s) were already processed and "
+                        f"{done_moved_count} input(s) were moved to Done.",
+                    )
+                else:
+                    push_apply_status("No scenes were queued for processing.", level="warning")
+                update_overlay(
+                    detail="Apply workflow completed.",
+                    progress=1.0,
+                    counter="",
+                    source=input_source,
+                    destination=output_folder,
                 )
-            elif processed_count > 0:
-                push_apply_status(
-                    f"Apply workflow completed. {processed_count} output(s) written and "
-                    f"{skipped_existing_count} already-existing output(s) skipped."
+                report_idle("Apply workflow completed.")
+            else:
+                summarized_failures = [
+                    f"{_derive_scene_stem(scene_path)}: {error_message}"
+                    for scene_path, error_message in failed_scene_records[:3]
+                ]
+                run_error_message = "; ".join(summarized_failures)
+                remaining_failures = failed_count - len(summarized_failures)
+                if remaining_failures > 0:
+                    run_error_message += f"; +{remaining_failures} more failure(s)"
+                summary_message = (
+                    f"Apply workflow completed with errors. {processed_count} output(s) written, "
+                    f"{failed_count} scene(s) failed, {done_moved_count} input(s) moved to Done, and "
+                    f"{failed_moved_count} input(s) moved to Failed."
                 )
-            elif skipped_existing_count > 0:
-                push_apply_status(
-                    "No new outputs were written. "
-                    f"{skipped_existing_count} scene(s) were skipped because matching output files already exist.",
-                    level="warning",
+                push_apply_status(summary_message, level="error")
+                update_overlay(
+                    detail=summary_message,
+                    progress=1.0,
+                    counter="",
+                    source=input_source,
+                    destination=output_folder,
                 )
-            update_overlay(
-                detail="Apply workflow completed.",
-                progress=1.0,
-                counter="",
-                source=input_source,
-                destination=output_folder,
-            )
-            report_idle("Apply workflow completed.")
+                set_app_status("error", "Apply workflow completed with failures.")
         except Exception as exc:  # noqa: BLE001 - surface backend errors to the user.
             run_failed = True
             run_error_message = str(exc)
@@ -4197,11 +4729,19 @@ def main(page: ft.Page) -> None:
             overlay_blocker.visible = False
             processed_count = len(completed_outputs)
             skipped_existing_count = len(skipped_existing_outputs)
+            failed_count = len(failed_scene_records)
+            done_moved_count = len(archived_done_inputs)
+            failed_moved_count = len(archived_failed_inputs)
             history_status_value = "failed" if run_failed else "success"
-            if not run_failed and processed_count > 0 and skipped_existing_count > 0:
-                history_status_value = "partial"
-            elif not run_failed and processed_count == 0 and skipped_existing_count > 0:
-                history_status_value = "skipped"
+            if not run_failed:
+                if failed_count > 0 and (processed_count > 0 or skipped_existing_count > 0):
+                    history_status_value = "partial"
+                elif failed_count > 0:
+                    history_status_value = "failed"
+                elif processed_count > 0 and skipped_existing_count > 0:
+                    history_status_value = "partial"
+                elif processed_count == 0 and skipped_existing_count > 0:
+                    history_status_value = "skipped"
             history_output_path = output_folder
             if processed_count == 1 and completed_outputs:
                 history_output_path = completed_outputs[0]
@@ -4218,12 +4758,19 @@ def main(page: ft.Page) -> None:
                 error_message=run_error_message,
                 details=(
                     f"Scenes={selected_scene_count}; queued={total_scenes}; processed={processed_count}; "
-                    f"skipped_existing={skipped_existing_count}; "
+                    f"skipped_existing={skipped_existing_count}; failed={failed_count}; "
+                    f"moved_done={done_moved_count}; moved_failed={failed_moved_count}; "
+                    f"archive_warnings={len(archive_warnings)}; "
                     f"duplicate_skipped={scene_batch_info.get('skipped_count', 0)}; ignored={ignored_count}"
                 ),
                 location_name=_resolve_location_from_mask(mask_path_value),
                 mask_extent_coords=_resolve_mask_extent_coordinates(mask_path_value),
             )
+            if single_scene_replacement_input["value"]:
+                apply_safe_field.value = str(single_scene_replacement_input["value"])
+            _reset_apply_preflight_state()
+            refresh_apply_preview()
+            refresh_apply_run_button_state()
             if run_failed:
                 set_app_status("error", "Apply workflow failed.")
             request_ui_refresh(force=True)
@@ -5803,6 +6350,9 @@ def main(page: ft.Page) -> None:
         if key_value in {"escape", "esc"} and history_map_popup_blocker.visible:
             close_history_map_popup(None)
             return
+        if key_value in {"escape", "esc"} and update_popup_blocker.visible:
+            close_update_popup(None)
+            return
         if key_value in {"escape", "esc"} and about_popup_blocker.visible:
             close_about_popup(None)
             return
@@ -6042,6 +6592,85 @@ def main(page: ft.Page) -> None:
         ],
     )
 
+    update_popup_blocker.left = 0
+    update_popup_blocker.top = 0
+    update_popup_blocker.right = 0
+    update_popup_blocker.bottom = 0
+    update_popup_blocker.visible = False
+    update_popup_dialog_container = ft.Container(
+        width=760,
+        padding=ft.padding.symmetric(horizontal=12, vertical=8),
+        content=_glass_panel(
+            padding=24,
+            content=ft.Column(
+                spacing=14,
+                tight=True,
+                controls=[
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Column(
+                                spacing=2,
+                                controls=[
+                                    update_popup_title,
+                                    ft.Text(
+                                        "Hosted from the ICE_CREAMS_STUDIO repository",
+                                        size=12,
+                                        color=LIQUID_SUBTEXT,
+                                    ),
+                                ],
+                            ),
+                            update_popup_close_button,
+                        ],
+                    ),
+                    update_popup_summary,
+                    ft.Container(
+                        padding=16,
+                        border_radius=18,
+                        bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
+                        border=ft.border.all(1, ft.Colors.with_opacity(0.28, ft.Colors.WHITE)),
+                        content=update_popup_details,
+                    ),
+                    update_popup_status,
+                    ft.Row(
+                        wrap=True,
+                        spacing=10,
+                        run_spacing=10,
+                        alignment=ft.MainAxisAlignment.END,
+                        controls=[
+                            update_popup_release_notes_button,
+                            update_popup_later_button,
+                            update_popup_install_button,
+                        ],
+                    ),
+                ],
+            ),
+        ),
+    )
+    update_popup_dialog_host = ft.Container(
+        expand=True,
+        padding=ft.padding.symmetric(horizontal=24, vertical=24),
+        alignment=ft.Alignment(0, 0),
+        content=update_popup_dialog_container,
+    )
+    update_popup_blocker.content = ft.Stack(
+        expand=True,
+        controls=[
+            ft.Container(
+                expand=True,
+                blur=(20, 20),
+                bgcolor=ft.Colors.with_opacity(0.42, "#B7CCE7"),
+            ),
+            ft.Container(
+                expand=True,
+                bgcolor=ft.Colors.TRANSPARENT,
+                on_click=close_update_popup,
+            ),
+            update_popup_dialog_host,
+        ],
+    )
+
     overlay_blocker.left = 0
     overlay_blocker.top = 0
     overlay_blocker.right = 0
@@ -6210,6 +6839,7 @@ def main(page: ft.Page) -> None:
             side_menu_overlay,
             menu_about_button,
             about_popup_blocker,
+            update_popup_blocker,
             batch_popup_blocker,
             validation_popup_blocker,
             history_map_popup_blocker,
@@ -6271,6 +6901,9 @@ def main(page: ft.Page) -> None:
         history_map_popup_dialog_host.padding = ft.padding.symmetric(
             horizontal=popup_padding_h, vertical=popup_padding_v
         )
+        update_popup_dialog_host.padding = ft.padding.symmetric(
+            horizontal=popup_padding_h, vertical=popup_padding_v
+        )
         overlay_dialog_host.padding = ft.padding.symmetric(
             horizontal=popup_padding_h, vertical=popup_padding_v
         )
@@ -6285,6 +6918,9 @@ def main(page: ft.Page) -> None:
         )
         history_map_popup_dialog_container.width = max(
             360, min(1240, viewport_width - (popup_padding_h * 2) - 12)
+        )
+        update_popup_dialog_container.width = max(
+            340, min(820, viewport_width - (popup_padding_h * 2) - 12)
         )
         overlay_dialog_container.width = max(
             320, min(980, viewport_width - (popup_padding_h * 2) - 12)
@@ -6391,6 +7027,7 @@ def main(page: ft.Page) -> None:
                 side_menu_overlay,
                 menu_about_button,
                 about_popup_blocker,
+                update_popup_blocker,
                 batch_popup_blocker,
                 validation_popup_blocker,
                 history_map_popup_blocker,
@@ -6414,6 +7051,7 @@ def main(page: ft.Page) -> None:
     )
     page.update()
     _close_startup_splash()
+    page.run_task(_run_startup_update_check)
 
 
 if __name__ == "__main__":
