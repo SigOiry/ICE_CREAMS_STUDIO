@@ -4,57 +4,45 @@ output: github_document
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# Intertidal Classification of Europe: Categorising Reflectance of Emerged Areas of Marine vegetation using Sentinel-2 (ICE CREAMS)
+# ICE CREAMS Studio
+
+If you are looking for the original ICE CREAMS algorithm repository, notebook workflow, or research-oriented codebase, start with the original project here: [BedeFfinian/ICE_CREAMS](https://github.com/BedeFfinian/ICE_CREAMS). This repository introduces the newer **ICE CREAMS Studio** desktop UI built around that original work.
+
+ICE CREAMS Studio packages the ICE CREAMS application workflow into a Windows desktop interface for applying the model to Sentinel-2 data more easily. The scientific background of the classifier is still summarised below.
+
+## Download and Installation
+
+The desktop application is distributed from the hosted UI repository: [SigOiry/ICE_CREAMS_STUDIO](https://github.com/SigOiry/ICE_CREAMS_STUDIO).
+
+To install the app:
+
+- download the Windows installer directly here: [`ICE_CREAMS_Installer_1_0_0.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_0.exe)
+- run the installer on Windows
+- launch **ICE CREAMS Studio** from the desktop shortcut or Start menu after installation
+
+For end users, the packaged desktop app is the recommended entry point. A separate Conda or notebook setup is not required just to run the application.
+
+## Current App Features
+
+Edit this list as new versions add, remove, or change features.
+
+- Windows desktop UI for running the ICE CREAMS workflow without opening the notebooks
+- Packaged model assets and validation tables shipped with the application
+- Guided selection of input scenes, masks, outputs, and available model files
+- Batch processing support for multiple Sentinel-2 scenes
+- Per-scene failure handling so one problematic input does not stop the rest of the batch
+- Automatic scene archiving into `Done` and `Failed` folders after processing
+- Progress, status, and completion feedback inside the application
+- Built-in update check with installer-based update flow
+- About panel with credits, external links, and app version display
+
+## Published Uses of ICE CREAMS
 
 Here we present the Neural Network Model produced during the BiCOME project to identify Intertidal habitats using Sentinel-2. The project was part of a wider European Space Agency funded work, with three studies that form part of the European Space Agency's 'Biodiversity+ Precursors' with [Terrestrial (EO4DIVERSITY)](https://www.eo4diversity.info/), [Freshwater (BIOMONDO)](https://www.biomondo.info/) and Coastal ecosystems [BiCOME project](https://bicome.info).
 
 ## Published Uses of ICE CREAMS
 
 The ICE CREAMS model has been used to create **An Initial Map of European Intertidal Seagrass** in [Davies *et al.,* 2026](https://doi.org/10.1016/j.rse.2025.115116), with the Open Access Application found [here](https://s2maxextenticecreams.projects.earthengine.app/view/europeanintertidalseagrass). The ICE CREAMS model has also been published in relation to Seagrass Phenology assessments and Seagrass Temporal Patterns in: [Davies *et al.,* 2024a](https://www.nature.com/articles/s43247-024-01543-z.pdf) and [Davies *et al.,* 2024b](https://www.sciencedirect.com/science/article/pii/S0034425724003584?via%3Dihub).
-
-## Environment Set Up (Current as of: `r Sys.Date()`) 
-
-create a conda environment, activate it and install jupyter lab to view the notebooks with the following code:
-
-
-- This installs all the versions of the necessary packages for all the notebooks in this repository into a virtual environment called 'ICE_CREAMS'. 
-
-```text
-conda create --name ICE_CREAMS conda-forge::fastai=2.8.4 fastcore=1.8.8 geopandas=1.1.1 rioxarray=0.18.1 dask=2025.7.0 libgdal-jp2openjpeg=3.10.3
-```
-
-- activate the environment
-
-```text
-conda activate ICE_CREAMS
-```
-### Added Extras
-
-- install jupyter-lab (this can be skipped if using a different GUI/reader)
-
-```text
-conda install jupyterlab
-
-jupyter-lab
-```
-
-## Practical Use Order
-
-For any new user it is essential to create a new pickle file as different operating systems and different fastai versions can create incompatible pickle files. 
-
-Therefore follow these steps fully: 
-
-- train the ICE_CREAMS model using the notebook called: 'Train_TabularLearner_NN_S2_ICECREAMS.ipynb'
-
-- export trained model as .pkl file. 
-
-- Test this .pkl file against the validation data in 'Apply_ICE_CREAMS_to_Labelled_Validation.ipynb'
-
-- Apply this .pkl file to a Copernicus .SAFE file with 'Apply_S2_ICECREAMS_To_SAFE_File.ipynb' (with an accompanying intertidal mask file that the user must create in the same CRS as the SAFE file)
-
-## General Contents
-
-This repository contains the scripts to train and apply the ICE CREAMS model to Sentinel-2 imagery. Sentinel-2 imagery should be downloaded from any source in the .SAFE format. This model assumes cloud free, low tide (totally emerged) intertidal areas (currently validated in Europe). 
 
 ## Methods
 

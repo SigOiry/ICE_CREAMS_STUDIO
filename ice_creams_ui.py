@@ -2182,7 +2182,6 @@ def main(page: ft.Page) -> None:
             set_app_status("busy", status_text)
         refresh_apply_run_button_state()
         refresh_apply_preview()
-        request_ui_refresh(force=True)
 
     def _collect_apply_preflight_plan(
         input_source: str,
@@ -2843,7 +2842,7 @@ def main(page: ft.Page) -> None:
 
     def request_ui_refresh(force: bool = False) -> None:
         """Coalesce frequent UI updates to keep batch runs responsive."""
-        min_interval = 0.08
+        min_interval = 0.016
 
         def _flush() -> None:
             ui_refresh_state["scheduled"] = False
@@ -2870,32 +2869,8 @@ def main(page: ft.Page) -> None:
 
         loop.call_later(delay, _flush)
 
-    ui_surface_controls: list[ft.Control] = []
-
-    def _refresh_ui_surface(*controls: ft.Control) -> None:
-        """Refresh the mounted UI in smaller chunks instead of redrawing the whole page."""
-        target_controls = list(controls) if controls else ui_surface_controls
-        if not target_controls:
-            page.update()
-            return
-
-        updated_any = False
-        seen_controls: set[int] = set()
-        for control in target_controls:
-            if control is None:
-                continue
-            control_id = id(control)
-            if control_id in seen_controls:
-                continue
-            seen_controls.add(control_id)
-            try:
-                control.update()
-                updated_any = True
-            except Exception:
-                continue
-
-        if not updated_any:
-            page.update()
+    def _refresh_ui_surface(*_controls: ft.Control) -> None:
+        page.update()
 
     def set_app_status(level: str, message: str) -> None:
         styles = {
@@ -6902,22 +6877,6 @@ def main(page: ft.Page) -> None:
             ),
             about_popup_dialog_host,
         ],
-    )
-
-    ui_surface_controls.extend(
-        [
-            active_view_host,
-            menu_toggle_badge,
-            side_menu_backdrop,
-            side_menu_overlay,
-            menu_about_button,
-            about_popup_blocker,
-            update_popup_blocker,
-            batch_popup_blocker,
-            validation_popup_blocker,
-            history_map_popup_blocker,
-            overlay_blocker,
-        ]
     )
 
     def _apply_responsive_layout() -> None:

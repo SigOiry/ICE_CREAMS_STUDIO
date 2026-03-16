@@ -199,7 +199,7 @@ DEFAULT_CLASSIFICATION_BATCH_SIZE = 8192
 MASK_EXTENT_BUFFER_DISTANCE = 60.0
 _MODEL_CACHE: dict[str, tuple[float, object]] = {}
 _S2_SCENE_ID_PATTERN = re.compile(
-    r"^S2[AB]_MSIL[12][AC]?_\d{8}T\d{6}_N\d{4}_R\d{3}_T[0-9A-Z]{5}_\d{8}T\d{6}$",
+    r"^S2[A-Z]_MSIL[12][AC]?_\d{8}T\d{6}_N\d{4}_R\d{3}_T[0-9A-Z]{5}_\d{8}T\d{6}$",
     re.IGNORECASE,
 )
 _ZIP_SCENE_CACHE: dict[str, tuple[int, float, list[str], bool]] = {}
@@ -478,6 +478,12 @@ def _apply_out_class_qgis_style(
             out_raster.set_band_description(band_index, "Out_Class")
             out_raster.write_colormap(band_index, colormap)
             out_raster.update_tags(band_index, **style_tags)
+            if out_raster.count >= 2:
+                out_raster.set_band_description(2, "Class_Probs")
+            if out_raster.count >= 3:
+                out_raster.set_band_description(3, "Seagrass_Cover")
+            if out_raster.count >= 4:
+                out_raster.set_band_description(4, "NDVI")
         _emit_status(status_callback, "Applied QGIS class colors and labels to Out_Class band")
     except Exception as exc:  # noqa: BLE001 - styling should not fail the main workflow.
         _emit_status(
@@ -847,6 +853,9 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
             if not filename.lower().endswith(".zip"):
                 continue
             zip_path = Path(root) / filename
+            if not _scene_id_from_filename_hint(zip_path):
+                ignored_candidates.append(str(zip_path))
+                continue
             zip_scene_ids = _extract_zip_safe_scene_ids(zip_path, allow_filename_hint=True)
             if zip_scene_ids:
                 discovered_records.append(
@@ -1461,9 +1470,9 @@ def apply_classification(
         predicted_probs = preds.max(dim=1).values.cpu().numpy().astype(numpy.float32)
 
         spc_values = valid_df["SPC"].to_numpy(dtype=numpy.float32, copy=True)
-        spc_values = numpy.where(predicted_classes == 3, spc_values, 0)
         spc_values = numpy.clip(spc_values, 0, 100)
-        spc20_values = numpy.where(spc_values >= 20, spc_values, 0).astype(numpy.float32)
+        seagrass_mask = (predicted_classes == 3) & (spc_values >= 20)
+        spc20_values = numpy.where(seagrass_mask, spc_values, -1.0).astype(numpy.float32)
 
         _emit_status(status_callback, "Assembling classification rasters")
         _emit_progress(progress_callback, 0.84)
@@ -1576,7 +1585,7 @@ def classify_s2_scene(
                 output_raster = Out_Classified_s2_data.squeeze(dim="band", drop=True)
             else:
                 output_raster = Out_Classified_s2_data[
-                    ["Out_Class", "Class_Probs", "Seagrass_Cover"]
+                    ["Out_Class", "Class_Probs", "Seagrass_Cover", "NDVI"]
                 ].squeeze(dim="band", drop=True)
 
             output_raster = output_raster.assign_attrs(

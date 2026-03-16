@@ -4,11 +4,11 @@
   "channel": "stable",
   "version": "1.0.0",
   "mandatory": false,
-  "published_at": "2026-03-16T11:56:14+01:00",
+  "published_at": "2026-03-16T13:14:59+01:00",
   "installer_name": "ICE_CREAMS_Installer_1_0_0.exe",
   "installer_path": "templates/Output/ICE_CREAMS_Installer_1_0_0.exe",
   "installer_url": "https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_0.exe",
-  "size_bytes": 331201209,
-  "sha256": "AED3B2762A4474C9C11326C9D254C52070765B3F087C8AACFC6E6DDEBB9CFCCF",
+  "size_bytes": 331202135,
+  "sha256": "8BEE989B34CD6BF9D1A0C254D98A33F6F63DF9D70590CF71A6A9D2C2AB381383",
   "release_notes_url": "https://github.com/SigOiry/ICE_CREAMS_STUDIO/blob/main/README.md"
 }
