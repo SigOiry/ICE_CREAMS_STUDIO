@@ -1268,15 +1268,15 @@ def _read_s2_data_xarray(
                 band.data = band.data - 1000
 
         _emit_status(status_callback, "Resampling buffered Sentinel-2 bands to 10 m")
-        b01_10m = b01.interp(x=b02.x, y=b02.y, method="nearest")
-        b05_10m = b05.interp(x=b02.x, y=b02.y, method="nearest")
-        b06_10m = b06.interp(x=b02.x, y=b02.y, method="nearest")
-        b07_10m = b07.interp(x=b02.x, y=b02.y, method="nearest")
-        b08a_10m = b08a.interp(x=b02.x, y=b02.y, method="nearest")
-        b11_10m = b11.interp(x=b02.x, y=b02.y, method="nearest")
-        b12_10m = b12.interp(x=b02.x, y=b02.y, method="nearest")
-        b09_10m = b09.interp(x=b02.x, y=b02.y, method="nearest")
-        scl_10m = scl.interp(x=b02.x, y=b02.y, method="nearest")
+        b01_10m = b01.reindex_like(b02, method="nearest")
+        b05_10m = b05.reindex_like(b02, method="nearest")
+        b06_10m = b06.reindex_like(b02, method="nearest")
+        b07_10m = b07.reindex_like(b02, method="nearest")
+        b08a_10m = b08a.reindex_like(b02, method="nearest")
+        b11_10m = b11.reindex_like(b02, method="nearest")
+        b12_10m = b12.reindex_like(b02, method="nearest")
+        b09_10m = b09.reindex_like(b02, method="nearest")
+        scl_10m = scl.reindex_like(b02, method="nearest")
 
         # Save all to one Raw dataset
         s2_data_raw = xarray.Dataset(
@@ -1445,6 +1445,7 @@ def apply_classification(
     out_class_values = numpy.full(pixel_count, -1, dtype=numpy.int16)
     class_probs_values = numpy.full(pixel_count, -1, dtype=numpy.float32)
     seagrass_cover_values = numpy.full(pixel_count, -1, dtype=numpy.float32)
+    ndvi_out_values = numpy.full(pixel_count, numpy.nan, dtype=numpy.float32)
 
     if valid_positions.size:
         _emit_status(
@@ -1479,6 +1480,9 @@ def apply_classification(
         out_class_values[valid_positions] = predicted_classes + 1
         class_probs_values[valid_positions] = predicted_probs
         seagrass_cover_values[valid_positions] = spc20_values
+        # Extract NDVI eagerly from valid_df (already computed as part of to_dataframe()).
+        # This avoids re-reading B04/B08/SCL from disk during the COG write step.
+        ndvi_out_values[valid_positions] = valid_df["NDVI"].to_numpy(dtype=numpy.float32, copy=True)
 
     output_vars = {}
     band_coord = input_xarray["Reflectance_B01"].coords["band"]
@@ -1486,6 +1490,7 @@ def apply_classification(
         "Out_Class": out_class_values,
         "Class_Probs": class_probs_values,
         "Seagrass_Cover": seagrass_cover_values,
+        "NDVI": ndvi_out_values,
     }
     for variable_name, variable_values in output_specs.items():
         output_vars[variable_name] = (
@@ -1500,7 +1505,9 @@ def apply_classification(
             .transpose("band", "y", "x")
         )
 
-    return xarray.merge([input_xarray, xarray.Dataset(output_vars)])
+    # Drop the lazy dask NDVI from input_xarray before merging so the eager
+    # numpy-backed NDVI in output_vars takes its place with no conflict.
+    return xarray.merge([input_xarray.drop_vars("NDVI", errors="ignore"), xarray.Dataset(output_vars)])
 
 
 def classify_s2_scene(

@@ -23,7 +23,7 @@ The desktop application is distributed from the hosted UI repository:
 To install the app:
 
 - download the Windows installer directly here:
-  [`ICE_CREAMS_Installer_1_0_0.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_0.exe)
+  [`ICE_CREAMS_Installer_1_0_1.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_1.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu
   after installation
@@ -36,6 +36,8 @@ application.
 
 Edit this list as new versions add, remove, or change features.
 
+- Version 1.0.1 adds optimized resampling performance during processing
+- Version 1.0.1 adds NDVI as an exported output
 - Windows desktop UI for running the ICE CREAMS workflow without opening
   the notebooks
 - Packaged model assets and validation tables shipped with the
