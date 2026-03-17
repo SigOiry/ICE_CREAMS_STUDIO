@@ -42,7 +42,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='C:\\Users\\Simon\\AppData\\Local\\Temp\\04beddcb-c962-4059-b392-776c3da4fc6f',
+    version='C:\\Users\\Simon\\AppData\\Local\\Temp\\a96e236c-b905-4460-b3d8-e947e040be66',
     icon=['C:\\Users\\Simon\\AppData\\Local\\Temp\\ice_creams_icon_square.png'],
 )
 coll = COLLECT(

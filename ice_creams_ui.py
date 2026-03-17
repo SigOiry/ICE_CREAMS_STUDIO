@@ -51,7 +51,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.20"
+APP_VERSION = "1.0.21"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -7117,11 +7117,38 @@ def main(page: ft.Page) -> None:
             _viewport_dimension(page.height or window_height, 900),
         )
 
+    def _device_pixel_ratio() -> float:
+        """Return the display device-pixel ratio (Windows zoom level / 100).
+
+        Flet reports page.width / page.height in *logical* pixels, which are
+        physical pixels divided by this ratio.  At 200 % Windows scaling a
+        1920-pixel-wide screen only has 960 logical pixels, which would
+        incorrectly trigger the compact-layout breakpoints.  Multiplying by
+        the ratio before comparing against breakpoints restores the intended
+        physical-pixel behaviour while leaving all control sizes in logical
+        pixels (Flutter DPI-scales those automatically).
+        """
+        try:
+            dpr = float(
+                getattr(page, "device_pixel_ratio", None)
+                or getattr(page.window, "device_pixel_ratio", None)
+                or 1.0
+            )
+            return max(0.5, dpr)
+        except Exception:
+            return 1.0
+
     def _apply_responsive_layout() -> None:
         viewport_width, viewport_height = _current_viewport_size()
-        compact_width = viewport_width < 1380
-        compact_height = viewport_height < 980
-        tight_height = viewport_height < 860
+        dpr = _device_pixel_ratio()
+
+        # Compare against breakpoints using physical-equivalent pixels so that
+        # layout decisions are independent of the Windows display-scaling level.
+        effective_width = int(viewport_width * dpr)
+        effective_height = int(viewport_height * dpr)
+        compact_width = effective_width < 1380
+        compact_height = effective_height < 980
+        tight_height = effective_height < 860
         compact_layout = compact_width or compact_height
 
         horizontal_padding = max(

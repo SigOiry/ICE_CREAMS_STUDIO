@@ -27,6 +27,7 @@ from typing import Callable
 
 import dask
 import numpy
+import pandas
 
 
 def _prepend_env_path(path_value: str) -> None:
@@ -1507,12 +1508,23 @@ def standerdise_reflectance(s2_data_raw):
         else:
             data_vars_list.append(data_var)
 
-    # Calculate the min and max, xarray will ignore no data values
+    # Calculate the min and max across all bands for each pixel.
+    # xarray ignores NaN values when computing min/max.
     s2_data_raw_array = s2_data_raw[data_vars_list].to_array(dim="wavelength")
     var_min = s2_data_raw_array.min(dim="wavelength")
     var_max = s2_data_raw_array.max(dim="wavelength")
+    var_range = var_max - var_min
 
-    s2_data_standardised = (s2_data_raw[data_vars_list] - var_min) / (var_max - var_min)
+    # Guard against division by zero: pixels where all bands are identical
+    # (var_range == 0) would produce NaN/Inf and corrupt model inputs.
+    # Use 1.0 as a safe denominator for those pixels; the xarray.where below
+    # then forces the output to 0.0 for them anyway.
+    safe_range = var_range.where(var_range > 0, other=1.0)
+    s2_data_standardised = xarray.where(
+        var_range > 0,
+        (s2_data_raw[data_vars_list] - var_min) / safe_range,
+        0.0,
+    )
 
     update_names = {
         data_var: data_var.replace("Reflectance_", "Reflectance_Stan_")
@@ -1555,16 +1567,16 @@ def calc_ndwi(s2_data_raw):
     return ndwi_raw
 
 
-def calc_spc(s2_data_raw):
+def calc_spc(ndvi):
     """
-    Function to calculate Seagrass Cover from S2 data loaded as xarray Dataset For Post-Processing
+    Function to calculate Seagrass Cover from an NDVI DataArray.
+
+    Accepts the output of calc_ndvi_true() directly so the B04/B08 dask
+    subgraph is shared rather than rebuilt from scratch.
 
     Returns xarray DataArray
     """
-    red_raw = s2_data_raw["Reflectance_B04"]
-    nir_raw = s2_data_raw["Reflectance_B08"]
-    NDVI = (nir_raw - red_raw) / (nir_raw + red_raw)
-    spc = 172.06*NDVI-22.18
+    spc = 172.06 * ndvi - 22.18
     spc.name = "SPC"
 
     return spc
@@ -1611,9 +1623,40 @@ def apply_classification(
             f"Preparing {valid_positions.size:,} masked pixel(s) for model inference",
         )
         _emit_progress(progress_callback, 0.70)
-        valid_pixels = stacked_data.isel(pixel=valid_positions)
+        # Skip Reflectance_Stan_* bands in the dask load: per-pixel standardization
+        # (min/max across all bands for a single pixel) is computed in numpy below,
+        # which costs nothing extra because the raw bands are already in memory.
+        stan_prefix = "Reflectance_Stan_"
+        vars_to_load = [v for v in stacked_data.data_vars if not v.startswith(stan_prefix)]
+        valid_pixels = stacked_data[vars_to_load].isel(pixel=valid_positions)
         with dask.config.set(scheduler="threads", num_workers=worker_count):
-            valid_df = valid_pixels.to_dataframe().fillna(0)
+            valid_pixels_computed = valid_pixels.compute()
+
+        data_dict = {var: valid_pixels_computed[var].values for var in valid_pixels_computed.data_vars}
+
+        # Per-pixel standardization in numpy.
+        # For each valid pixel: scale every reflectance band to [0, 1] using that
+        # pixel's own min and max across all bands.  The raw band values are already
+        # in memory, so this is pure arithmetic — no extra disk reads.
+        raw_band_vars = sorted(v for v in data_dict if v.startswith("Reflectance_B"))
+        raw_band_matrix = numpy.stack(
+            [data_dict[v] for v in raw_band_vars], axis=0
+        ).astype(numpy.float32)  # shape: (n_bands, n_valid_pixels)
+        var_min_np = numpy.nanmin(raw_band_matrix, axis=0)  # (n_valid,) — per-pixel min
+        var_max_np = numpy.nanmax(raw_band_matrix, axis=0)  # (n_valid,) — per-pixel max
+        var_range_np = var_max_np - var_min_np
+        safe_range_np = numpy.where(var_range_np > 0, var_range_np, 1.0)
+        uniform_mask = var_range_np > 0  # pixels where all bands have the same value → 0.0
+
+        for band_var in raw_band_vars:
+            stan_name = band_var.replace("Reflectance_", "Reflectance_Stan_")
+            data_dict[stan_name] = numpy.where(
+                uniform_mask,
+                (data_dict[band_var].astype(numpy.float32) - var_min_np) / safe_range_np,
+                0.0,
+            )
+
+        valid_df = pandas.DataFrame(data_dict).fillna(0)
 
         _emit_status(
             status_callback,
@@ -1717,20 +1760,18 @@ def classify_s2_scene(
             )
             _emit_progress(progress_callback, 0.35)
 
-            # Standardise data
-            _emit_status(status_callback, "Standardising reflectance bands")
-            s2_data_stan = standerdise_reflectance(s2_data_raw)
-            _emit_progress(progress_callback, 0.48)
-
             # Calculate NDVI, NDWI and SPC
+            # Standardisation (Reflectance_Stan_*) is now computed inside
+            # apply_classification using numpy on the already-loaded raw bands —
+            # no separate dask graph or pre-compute step needed here.
             _emit_status(status_callback, "Calculating derived features (NDVI, NDWI, SPC)")
             ndwi_raw = calc_ndwi(s2_data_raw)
             ndvi_true_raw = calc_ndvi_true(s2_data_raw)
-            spc_raw = calc_spc(s2_data_raw)
+            spc_raw = calc_spc(ndvi_true_raw)  # reuse the already-built NDVI dask graph
             _emit_progress(progress_callback, 0.58)
 
             # Merge to a single xarray
-            s2_data = xarray.merge([s2_data_raw, s2_data_stan, ndwi_raw, ndvi_true_raw, spc_raw])
+            s2_data = xarray.merge([s2_data_raw, ndwi_raw, ndvi_true_raw, spc_raw])
 
             # Apply classification. Will print progress
             _emit_status(status_callback, "Applying the ICE CREAMS model")
