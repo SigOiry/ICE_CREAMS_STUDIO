@@ -51,7 +51,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.14"
+APP_VERSION = "1.0.20"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -68,6 +68,26 @@ LIQUID_SURFACE_ALT = "#EAF3FF"
 LIQUID_TEXT = "#0F253D"
 LIQUID_SUBTEXT = "#2E4B69"
 LIQUID_MUTED = "#607E9E"
+# Frosted-glass blur is visually nice but expensive on some Windows GPUs, so
+# keep it opt-in and ship the desktop UI in the cheaper compositing mode.
+ENABLE_DECORATIVE_BLUR = str(os.environ.get("ICECREAMS_ENABLE_DECORATIVE_BLUR", "")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+GLASS_PANEL_BLUR = (40, 40) if ENABLE_DECORATIVE_BLUR else None
+MODAL_SCRIM_BLUR = (18, 18) if ENABLE_DECORATIVE_BLUR else None
+SHOW_AMBIENT_BACKGROUND_BLOBS = ENABLE_DECORATIVE_BLUR
+UI_REFRESH_MIN_INTERVAL_SECONDS = 0.05
+MODAL_SCRIM_BG = ft.Colors.with_opacity(0.38, "#10263D")
+MODAL_SCRIM_BG_STRONG = ft.Colors.with_opacity(0.46, "#10263D")
+MODAL_PANEL_BG = ft.Colors.with_opacity(0.92, "#F8FBFF")
+MODAL_PANEL_GRADIENT_TOP = ft.Colors.with_opacity(0.98, "#FFFFFF")
+MODAL_PANEL_GRADIENT_BOTTOM = ft.Colors.with_opacity(0.94, "#E7F1FF")
+MODAL_PANEL_BORDER = ft.Colors.with_opacity(0.82, "#FFFFFF")
+MODAL_PANEL_DIVIDER = ft.Colors.with_opacity(0.18, "#16314C")
+MODAL_BACKGROUND_OPACITY = 0.82
 
 
 def _close_startup_splash() -> None:
@@ -338,39 +358,104 @@ def _launch_windows_update_installer(installer_path: Path) -> None:
     )
 
 
-def _glass_panel(content: ft.Control, expand: bool = False, padding: int = 24) -> ft.Container:
+def _glass_panel(
+    content: ft.Control,
+    expand: bool = False,
+    padding: int = 24,
+    *,
+    variant: str = "card",
+    accent: str | None = None,
+) -> ft.Container:
     """Create a liquid-glass card used throughout the UI."""
+    panel_accent = accent or LIQUID_ACCENT
+    is_modal = variant == "modal"
+    is_sidebar = variant == "sidebar"
+    if is_modal:
+        content = ft.Column(
+            spacing=18,
+            tight=True,
+            controls=[
+                ft.Row(
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            width=56,
+                            height=5,
+                            border_radius=999,
+                            bgcolor=panel_accent,
+                        ),
+                        ft.Container(
+                            expand=True,
+                            height=1,
+                            bgcolor=MODAL_PANEL_DIVIDER,
+                        ),
+                    ],
+                ),
+                content,
+            ],
+        )
+    uses_opaque_surface = is_modal or is_sidebar
+
     return ft.Container(
         content=content,
         expand=expand,
         padding=padding,
-        border_radius=28,
-        blur=(40, 40),
-        bgcolor=ft.Colors.with_opacity(0.52, LIQUID_SURFACE),
+        border_radius=30 if uses_opaque_surface else 28,
+        blur=None if uses_opaque_surface else GLASS_PANEL_BLUR,
+        bgcolor=MODAL_PANEL_BG if uses_opaque_surface else ft.Colors.with_opacity(0.52, LIQUID_SURFACE),
         gradient=ft.LinearGradient(
             begin=ft.Alignment(-1.0, -1.0),
             end=ft.Alignment(1.0, 1.0),
-            colors=[
-                ft.Colors.with_opacity(0.62, "#FFFFFF"),
-                ft.Colors.with_opacity(0.40, LIQUID_SURFACE_ALT),
-                ft.Colors.with_opacity(0.18, "#DCEAFF"),
-            ],
+            colors=(
+                [
+                    MODAL_PANEL_GRADIENT_TOP,
+                    ft.Colors.with_opacity(0.96, "#F2F8FF"),
+                    MODAL_PANEL_GRADIENT_BOTTOM,
+                ]
+                if uses_opaque_surface
+                else [
+                    ft.Colors.with_opacity(0.62, "#FFFFFF"),
+                    ft.Colors.with_opacity(0.40, LIQUID_SURFACE_ALT),
+                    ft.Colors.with_opacity(0.18, "#DCEAFF"),
+                ]
+            ),
         ),
-        border=ft.border.all(1, ft.Colors.with_opacity(0.56, "#FFFFFF")),
-        shadow=[
-            ft.BoxShadow(
-                blur_radius=18,
-                spread_radius=0,
-                color=ft.Colors.with_opacity(0.10, "#284D72"),
-                offset=(0, 6),
-            ),
-            ft.BoxShadow(
-                blur_radius=22,
-                spread_radius=-6,
-                color=ft.Colors.with_opacity(0.62, "#FFFFFF"),
-                offset=(0, 1),
-            ),
-        ],
+        border=ft.border.all(
+            1,
+            MODAL_PANEL_BORDER if uses_opaque_surface else ft.Colors.with_opacity(0.56, "#FFFFFF"),
+        ),
+        shadow=(
+            [
+                ft.BoxShadow(
+                    blur_radius=30,
+                    spread_radius=0,
+                    color=ft.Colors.with_opacity(0.18, "#10263D"),
+                    offset=(0, 14),
+                ),
+                ft.BoxShadow(
+                    blur_radius=8,
+                    spread_radius=0,
+                    color=ft.Colors.with_opacity(0.10, panel_accent),
+                    offset=(0, 2),
+                ),
+            ]
+            if uses_opaque_surface
+            else [
+                ft.BoxShadow(
+                    blur_radius=18,
+                    spread_radius=0,
+                    color=ft.Colors.with_opacity(0.10, "#284D72"),
+                    offset=(0, 6),
+                ),
+                ft.BoxShadow(
+                    blur_radius=22,
+                    spread_radius=-6,
+                    color=ft.Colors.with_opacity(0.62, "#FFFFFF"),
+                    offset=(0, 1),
+                ),
+            ]
+        ),
     )
 
 
@@ -1308,6 +1393,8 @@ def main(page: ft.Page) -> None:
         padding=ft.padding.symmetric(horizontal=12, vertical=8),
         content=_glass_panel(
             padding=24,
+            variant="modal",
+            accent=LIQUID_ACCENT,
             content=ft.Column(
                 spacing=14,
                 scroll=ft.ScrollMode.AUTO,
@@ -2406,14 +2493,16 @@ def main(page: ft.Page) -> None:
 
     def hide_about_popup() -> None:
         about_popup_blocker.visible = False
+        _sync_modal_shell_emphasis()
 
     def show_about_popup(_: ft.ControlEvent | None = None) -> None:
         about_popup_blocker.visible = True
-        _refresh_ui_surface(about_popup_blocker)
+        _sync_modal_shell_emphasis()
+        _refresh_ui_surface(shell, about_popup_blocker)
 
     def close_about_popup(_: ft.ControlEvent | None = None) -> None:
         hide_about_popup()
-        _refresh_ui_surface(about_popup_blocker)
+        _refresh_ui_surface(shell, about_popup_blocker)
 
     def hide_update_popup() -> None:
         if update_state["install_running"]:
@@ -2421,6 +2510,7 @@ def main(page: ft.Page) -> None:
         update_popup_blocker.visible = False
         update_popup_status.value = ""
         update_popup_status.visible = False
+        _sync_modal_shell_emphasis()
 
     def show_update_popup(
         manifest: dict[str, object],
@@ -2452,7 +2542,8 @@ def main(page: ft.Page) -> None:
         update_popup_status.value = error_message
         update_popup_status.visible = bool(error_message)
         update_popup_blocker.visible = True
-        _refresh_ui_surface(update_popup_blocker)
+        _sync_modal_shell_emphasis()
+        _refresh_ui_surface(shell, update_popup_blocker)
 
     def close_update_popup(_: ft.ControlEvent | None = None) -> None:
         if update_state["install_running"]:
@@ -2460,7 +2551,7 @@ def main(page: ft.Page) -> None:
         hide_update_popup()
         if not state["busy"]:
             report_idle("Ready for a new run.")
-        _refresh_ui_surface(update_popup_blocker)
+        _refresh_ui_surface(shell, update_popup_blocker)
 
     def _close_application_window() -> None:
         try:
@@ -2621,6 +2712,7 @@ def main(page: ft.Page) -> None:
 
     def hide_batch_popup() -> None:
         batch_popup_blocker.visible = False
+        _sync_modal_shell_emphasis()
 
     def show_batch_popup(batch_info: dict[str, object]) -> None:
         format_counts = batch_info["format_counts"]
@@ -2679,14 +2771,16 @@ def main(page: ft.Page) -> None:
             )
         batch_popup_table.rows = table_rows
         batch_popup_blocker.visible = True
-        _refresh_ui_surface(batch_popup_blocker)
+        _sync_modal_shell_emphasis()
+        _refresh_ui_surface(shell, batch_popup_blocker)
 
     def close_batch_popup(_: ft.ControlEvent) -> None:
         hide_batch_popup()
-        _refresh_ui_surface(batch_popup_blocker)
+        _refresh_ui_surface(shell, batch_popup_blocker)
 
     def hide_validation_popup() -> None:
         validation_popup_blocker.visible = False
+        _sync_modal_shell_emphasis()
 
     def show_validation_popup(result: dict[str, object]) -> None:
         accuracy_raw = result.get("overall_accuracy")
@@ -2779,11 +2873,12 @@ def main(page: ft.Page) -> None:
             validation_popup_note.visible = False
 
         validation_popup_blocker.visible = True
-        _refresh_ui_surface(validation_popup_blocker)
+        _sync_modal_shell_emphasis()
+        _refresh_ui_surface(shell, validation_popup_blocker)
 
     def close_validation_popup(_: ft.ControlEvent) -> None:
         hide_validation_popup()
-        _refresh_ui_surface(validation_popup_blocker)
+        _refresh_ui_surface(shell, validation_popup_blocker)
 
     def _history_map_placeholder(message: str) -> ft.Control:
         return ft.Container(
@@ -2804,6 +2899,7 @@ def main(page: ft.Page) -> None:
         history_map_popup_content_host.content = _history_map_placeholder(
             "Select a run with a stored mask extent to display the map."
         )
+        _sync_modal_shell_emphasis()
 
     def show_history_map_popup(entry: dict[str, object]) -> None:
         extent_coords = _history_mask_extent_coords(entry, resolve_missing=True)
@@ -2852,11 +2948,12 @@ def main(page: ft.Page) -> None:
             history_map_popup_external_button.on_click = None
 
         history_map_popup_blocker.visible = True
-        _refresh_ui_surface(history_map_popup_blocker)
+        _sync_modal_shell_emphasis()
+        _refresh_ui_surface(shell, history_map_popup_blocker)
 
     def close_history_map_popup(_: ft.ControlEvent | None = None) -> None:
         hide_history_map_popup()
-        _refresh_ui_surface(history_map_popup_blocker)
+        _refresh_ui_surface(shell, history_map_popup_blocker)
 
     def _resolve_log_level(message: str, level: str = "info") -> str:
         if level != "info":
@@ -2882,7 +2979,7 @@ def main(page: ft.Page) -> None:
 
     def request_ui_refresh(force: bool = False) -> None:
         """Coalesce frequent UI updates to keep batch runs responsive."""
-        min_interval = 0.016
+        min_interval = UI_REFRESH_MIN_INTERVAL_SECONDS
 
         def _flush() -> None:
             ui_refresh_state["scheduled"] = False
@@ -2909,8 +3006,42 @@ def main(page: ft.Page) -> None:
 
         loop.call_later(delay, _flush)
 
-    def _refresh_ui_surface(*_controls: ft.Control) -> None:
-        page.update()
+    def _refresh_ui_surface(*controls: ft.Control) -> None:
+        refresh_targets: list[ft.Control] = []
+        seen_target_ids: set[int] = set()
+        for control in controls:
+            if control is None:
+                continue
+            control_id = id(control)
+            if control_id in seen_target_ids:
+                continue
+            seen_target_ids.add(control_id)
+            refresh_targets.append(control)
+
+        if not refresh_targets:
+            page.update()
+            return
+
+        try:
+            for control in refresh_targets:
+                control.update()
+        except Exception:
+            page.update()
+
+    def _sync_modal_shell_emphasis() -> None:
+        modal_visible = any(
+            bool(getattr(blocker, "visible", False))
+            for blocker in (
+                about_popup_blocker,
+                update_popup_blocker,
+                batch_popup_blocker,
+                validation_popup_blocker,
+                history_map_popup_blocker,
+                overlay_blocker,
+            )
+        )
+        modal_visible = modal_visible or bool(menu_state.get("open"))
+        shell.opacity = MODAL_BACKGROUND_OPACITY if modal_visible else (0.90 if state["busy"] else 1.0)
 
     def set_app_status(level: str, message: str) -> None:
         styles = {
@@ -3939,7 +4070,7 @@ def main(page: ft.Page) -> None:
         if status_text:
             set_app_status("busy" if is_busy else "ready", status_text)
         overlay_blocker.visible = is_busy
-        shell.opacity = 0.90 if is_busy else 1.0
+        _sync_modal_shell_emphasis()
         if not is_busy:
             state["operation_mode"] = None
             update_overlay(
@@ -6288,6 +6419,8 @@ def main(page: ft.Page) -> None:
         content=_glass_panel(
             expand=True,
             padding=18,
+            variant="sidebar",
+            accent=LIQUID_ACCENT,
             content=ft.Column(
                 spacing=14,
                 expand=True,
@@ -6340,8 +6473,8 @@ def main(page: ft.Page) -> None:
             controls=[
                 ft.Container(
                     expand=True,
-                    blur=(18, 18),
-                    bgcolor=ft.Colors.with_opacity(0.30, "#D7E5F6"),
+                    blur=MODAL_SCRIM_BLUR,
+                    bgcolor=MODAL_SCRIM_BG,
                 ),
                 ft.Container(
                     expand=True,
@@ -6371,6 +6504,7 @@ def main(page: ft.Page) -> None:
         menu_update_button.visible = is_open
         if not is_open:
             about_popup_blocker.visible = False
+        _sync_modal_shell_emphasis()
         menu_toggle_icon.name = ft.Icons.CLOSE if is_open else ft.Icons.MENU
         menu_toggle_title.value = "Menu"
         menu_toggle_indicator.bgcolor = "#41B883" if is_open else LIQUID_ACCENT
@@ -6385,11 +6519,13 @@ def main(page: ft.Page) -> None:
         )
         if refresh:
             _refresh_ui_surface(
+                shell,
                 side_menu_backdrop,
                 side_menu_overlay,
                 menu_about_button,
                 menu_update_button,
                 menu_toggle_badge,
+                about_popup_blocker,
             )
 
     def set_active_tab(tab_name: str, refresh: bool = True) -> None:
@@ -6538,6 +6674,8 @@ def main(page: ft.Page) -> None:
         padding=ft.padding.symmetric(horizontal=12, vertical=8),
         content=_glass_panel(
             padding=24,
+            variant="modal",
+            accent="#F5A623",
             content=ft.Column(
                 spacing=14,
                 tight=True,
@@ -6576,8 +6714,8 @@ def main(page: ft.Page) -> None:
         controls=[
             ft.Container(
                 expand=True,
-                blur=(18, 18),
-                bgcolor=ft.Colors.with_opacity(0.30, "#D7E5F6"),
+                blur=MODAL_SCRIM_BLUR,
+                bgcolor=MODAL_SCRIM_BG,
             ),
             ft.Container(
                 expand=True,
@@ -6598,6 +6736,8 @@ def main(page: ft.Page) -> None:
         padding=ft.padding.symmetric(horizontal=12, vertical=8),
         content=_glass_panel(
             padding=24,
+            variant="modal",
+            accent=LIQUID_ACCENT,
             content=ft.Column(
                 spacing=14,
                 tight=True,
@@ -6638,8 +6778,8 @@ def main(page: ft.Page) -> None:
         controls=[
             ft.Container(
                 expand=True,
-                blur=(18, 18),
-                bgcolor=ft.Colors.with_opacity(0.30, "#D7E5F6"),
+                blur=MODAL_SCRIM_BLUR,
+                bgcolor=MODAL_SCRIM_BG,
             ),
             ft.Container(
                 expand=True,
@@ -6660,6 +6800,8 @@ def main(page: ft.Page) -> None:
         padding=ft.padding.symmetric(horizontal=12, vertical=8),
         content=_glass_panel(
             padding=24,
+            variant="modal",
+            accent=LIQUID_ACCENT,
             content=ft.Column(
                 spacing=14,
                 tight=True,
@@ -6705,8 +6847,8 @@ def main(page: ft.Page) -> None:
         controls=[
             ft.Container(
                 expand=True,
-                blur=(18, 18),
-                bgcolor=ft.Colors.with_opacity(0.30, "#D7E5F6"),
+                blur=MODAL_SCRIM_BLUR,
+                bgcolor=MODAL_SCRIM_BG,
             ),
             ft.Container(
                 expand=True,
@@ -6727,6 +6869,8 @@ def main(page: ft.Page) -> None:
         padding=ft.padding.symmetric(horizontal=12, vertical=8),
         content=_glass_panel(
             padding=24,
+            variant="modal",
+            accent="#41B883",
             content=ft.Column(
                 spacing=14,
                 tight=True,
@@ -6784,8 +6928,8 @@ def main(page: ft.Page) -> None:
         controls=[
             ft.Container(
                 expand=True,
-                blur=(20, 20),
-                bgcolor=ft.Colors.with_opacity(0.42, "#B7CCE7"),
+                blur=MODAL_SCRIM_BLUR,
+                bgcolor=MODAL_SCRIM_BG_STRONG,
             ),
             ft.Container(
                 expand=True,
@@ -6806,6 +6950,8 @@ def main(page: ft.Page) -> None:
         padding=ft.padding.symmetric(horizontal=12, vertical=8),
         content=_glass_panel(
             padding=26,
+            variant="modal",
+            accent="#F5A623",
             content=ft.Column(
                 spacing=16,
                 tight=True,
@@ -6921,8 +7067,8 @@ def main(page: ft.Page) -> None:
         controls=[
             ft.Container(
                 expand=True,
-                blur=(18, 18),
-                bgcolor=ft.Colors.with_opacity(0.40, "#D7E5F6"),
+                blur=MODAL_SCRIM_BLUR,
+                bgcolor=MODAL_SCRIM_BG_STRONG,
             ),
             overlay_dialog_host,
         ],
@@ -6944,8 +7090,8 @@ def main(page: ft.Page) -> None:
         controls=[
             ft.Container(
                 expand=True,
-                blur=(20, 20),
-                bgcolor=ft.Colors.with_opacity(0.42, "#B7CCE7"),
+                blur=MODAL_SCRIM_BLUR,
+                bgcolor=MODAL_SCRIM_BG_STRONG,
             ),
             ft.Container(
                 expand=True,
@@ -7190,27 +7336,28 @@ def main(page: ft.Page) -> None:
     page.on_keyboard_event = on_page_keyboard
     _apply_responsive_layout()
 
-    page.add(
-        ft.Stack(
+    background_controls: list[ft.Control] = [
+        ft.Container(
             expand=True,
-            controls=[
-                ft.Container(
-                    expand=True,
-                    gradient=ft.LinearGradient(
-                        begin=ft.Alignment(-1, -1),
-                        end=ft.Alignment(1, 1),
-                        colors=[
-                            "#E9F3FF",
-                            "#D9E9FB",
-                            "#D3E4F9",
-                            "#EDF5FF",
-                        ],
-                    ),
-                ),
-                ft.Container(
-                    expand=True,
-                    bgcolor=ft.Colors.with_opacity(0.12, "#FFFFFF"),
-                ),
+            gradient=ft.LinearGradient(
+                begin=ft.Alignment(-1, -1),
+                end=ft.Alignment(1, 1),
+                colors=[
+                    "#E9F3FF",
+                    "#D9E9FB",
+                    "#D3E4F9",
+                    "#EDF5FF",
+                ],
+            ),
+        ),
+        ft.Container(
+            expand=True,
+            bgcolor=ft.Colors.with_opacity(0.12, "#FFFFFF"),
+        ),
+    ]
+    if SHOW_AMBIENT_BACKGROUND_BLOBS:
+        background_controls.extend(
+            [
                 ft.Container(
                     width=360,
                     height=360,
@@ -7247,6 +7394,14 @@ def main(page: ft.Page) -> None:
                     blur=(150, 150),
                     bgcolor=ft.Colors.with_opacity(0.10, "#B5D6FF"),
                 ),
+            ]
+        )
+
+    page.add(
+        ft.Stack(
+            expand=True,
+            controls=[
+                *background_controls,
                 shell,
                 menu_toggle_badge,
                 side_menu_backdrop,

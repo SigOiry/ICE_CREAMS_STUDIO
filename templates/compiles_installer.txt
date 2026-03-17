@@ -2,7 +2,6 @@
 
 $appName = "ICE_CREAMS_Studio"
 $appDisplayName = "ICE CREAMS Studio"
-$appVersion = "1.0.0"
 $distRoot = ".\dist\$appName"
 $distExe = "$distRoot\$appName.exe"
 $issScript = ".\templates\ice_creams_installer.iss"
@@ -73,6 +72,13 @@ if (!(Test-Path $issScript)) {
   throw "Missing Inno Setup script: $issScript"
 }
 
+$appVersion = Select-String -Path $issScript -Pattern '^\s*#define\s+AppVersion\s+"([^"]+)"' `
+  | Select-Object -First 1 `
+  | ForEach-Object { $_.Matches[0].Groups[1].Value }
+if ([string]::IsNullOrWhiteSpace($appVersion)) {
+  throw "Could not read AppVersion from $issScript"
+}
+
 $isccCandidates = @(
   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
   "C:\Program Files\Inno Setup 6\ISCC.exe",
@@ -91,5 +97,5 @@ if ([string]::IsNullOrWhiteSpace($iscc)) {
   $issScript
 
 Write-Host "Installer compilation complete."
-Write-Host "Expected output: .\templates\Output\ICE_CREAMS_Installer_1_0_0.exe"
+Write-Host "Expected output: .\templates\Output\ICE_CREAMS_Installer_$($appVersion.Replace('.', '_')).exe"
 Write-Host "Bundled validation tables verified: $($bundledValidationTables.Count) table(s)"
