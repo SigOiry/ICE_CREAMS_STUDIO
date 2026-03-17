@@ -23,7 +23,7 @@ The desktop application is distributed from the hosted UI repository:
 To install the app:
 
 - download the Windows installer directly here:
-  [`ICE_CREAMS_Installer_1_0_1.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_1.exe)
+  [`ICE_CREAMS_Installer_1_0_14.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_14.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu
   after installation

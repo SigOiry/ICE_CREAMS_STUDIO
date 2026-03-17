@@ -51,7 +51,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -433,7 +433,7 @@ def _labeled_picker(
                             content=field,
                         ),
                         ft.Container(
-                            col={"xs": 12, "md": 4},
+                            col={"xs": 12, "sm": 6, "lg": 4},
                             content=button,
                         ),
                     ],
@@ -5289,6 +5289,13 @@ def main(page: ft.Page) -> None:
             "Run and review confusion matrix",
         ],
     )
+    train_paths_panel_ref: ft.Container | None = None
+    train_settings_panel_ref: ft.Container | None = None
+    train_main_content_ref: ft.Container | None = None
+    validation_paths_panel_ref: ft.Container | None = None
+    validation_preview_panel_ref: ft.Container | None = None
+    validation_main_content_ref: ft.Container | None = None
+    history_main_content_ref: ft.Container | None = None
 
     apply_paths_panel = _glass_panel(
         padding=18,
@@ -5307,7 +5314,7 @@ def main(page: ft.Page) -> None:
                     spacing=12,
                     controls=[
                         ft.Container(
-                            col={"xs": 12, "md": 4},
+                            col={"xs": 12, "sm": 6, "lg": 4},
                             padding=14,
                             border_radius=20,
                             bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
@@ -5339,7 +5346,7 @@ def main(page: ft.Page) -> None:
                             ),
                         ),
                         ft.Container(
-                            col={"xs": 12, "md": 4},
+                            col={"xs": 12, "sm": 6, "lg": 4},
                             padding=14,
                             border_radius=20,
                             bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
@@ -5572,6 +5579,7 @@ def main(page: ft.Page) -> None:
     history_view_initialized = {"value": False}
 
     def _build_train_view() -> ft.Control:
+        nonlocal train_main_content_ref, train_paths_panel_ref, train_settings_panel_ref
         cached_view = lazy_tab_view_cache.get("train")
         if cached_view is not None:
             return cached_view
@@ -5675,6 +5683,7 @@ def main(page: ft.Page) -> None:
                 ],
             ),
         )
+        train_paths_panel_ref = train_paths_panel
 
         train_main_content = ft.Container(
             width=1460,
@@ -5771,6 +5780,10 @@ def main(page: ft.Page) -> None:
                 ],
             ),
         )
+        train_main_content_ref = train_main_content
+        train_column = train_main_content.content
+        if isinstance(train_column, ft.Column) and len(train_column.controls) >= 3:
+            train_settings_panel_ref = train_column.controls[2]
 
         train_run_badge = ft.Container(
             right=24,
@@ -5848,6 +5861,7 @@ def main(page: ft.Page) -> None:
     )
 
     def _build_validation_view() -> ft.Control:
+        nonlocal validation_main_content_ref, validation_paths_panel_ref, validation_preview_panel_ref
         cached_view = lazy_tab_view_cache.get("validation")
         if cached_view is not None:
             return cached_view
@@ -5869,7 +5883,7 @@ def main(page: ft.Page) -> None:
                         spacing=12,
                         controls=[
                             ft.Container(
-                                col={"xs": 12, "md": 4},
+                                col={"xs": 12, "sm": 6, "lg": 4},
                                 padding=14,
                                 border_radius=20,
                                 bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
@@ -5890,7 +5904,7 @@ def main(page: ft.Page) -> None:
                                 ),
                             ),
                             ft.Container(
-                                col={"xs": 12, "md": 4},
+                                col={"xs": 12, "sm": 6, "lg": 4},
                                 padding=14,
                                 border_radius=20,
                                 bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
@@ -5919,7 +5933,7 @@ def main(page: ft.Page) -> None:
                                 ),
                             ),
                             ft.Container(
-                                col={"xs": 12, "md": 4},
+                                col={"xs": 12, "sm": 6, "lg": 4},
                                 padding=14,
                                 border_radius=20,
                                 bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
@@ -5947,6 +5961,7 @@ def main(page: ft.Page) -> None:
                 ],
             ),
         )
+        validation_paths_panel_ref = validation_paths_panel
 
         validation_main_content = ft.Container(
             width=1460,
@@ -5998,6 +6013,10 @@ def main(page: ft.Page) -> None:
                 ],
             ),
         )
+        validation_main_content_ref = validation_main_content
+        validation_column = validation_main_content.content
+        if isinstance(validation_column, ft.Column) and len(validation_column.controls) >= 3:
+            validation_preview_panel_ref = validation_column.controls[2]
 
         validation_run_badge = ft.Container(
             right=24,
@@ -6035,6 +6054,7 @@ def main(page: ft.Page) -> None:
         return validation_view
 
     def _build_history_view() -> ft.Control:
+        nonlocal history_main_content_ref
         cached_view = lazy_tab_view_cache.get("history")
         if cached_view is not None:
             return cached_view
@@ -6104,6 +6124,7 @@ def main(page: ft.Page) -> None:
                 ],
             ),
         )
+        history_main_content_ref = history_main_content
 
         history_refresh_badge = ft.Container(
             right=24,
@@ -6935,25 +6956,121 @@ def main(page: ft.Page) -> None:
         ],
     )
 
-    def _apply_responsive_layout() -> None:
-        viewport_width = page.width or 1600
-        viewport_height = page.height or 900
+    def _viewport_dimension(raw_value: object, fallback: int) -> int:
+        try:
+            value = int(float(raw_value))
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
 
-        horizontal_padding = max(10, min(28, int(viewport_width * 0.018)))
-        vertical_padding = max(8, min(22, int(viewport_height * 0.018)))
-        top_padding = max(64, min(96, int(viewport_height * 0.09)))
+    def _current_viewport_size() -> tuple[int, int]:
+        window_width = getattr(page.window, "width", None)
+        window_height = getattr(page.window, "height", None)
+        return (
+            _viewport_dimension(page.width or window_width, 1600),
+            _viewport_dimension(page.height or window_height, 900),
+        )
+
+    def _apply_responsive_layout() -> None:
+        viewport_width, viewport_height = _current_viewport_size()
+        compact_width = viewport_width < 1380
+        compact_height = viewport_height < 980
+        tight_height = viewport_height < 860
+        compact_layout = compact_width or compact_height
+
+        horizontal_padding = max(
+            8,
+            min(24 if compact_layout else 28, int(viewport_width * (0.014 if compact_layout else 0.018))),
+        )
+        vertical_padding = max(
+            8,
+            min(18 if compact_layout else 22, int(viewport_height * (0.014 if compact_layout else 0.018))),
+        )
+        top_padding = max(
+            48 if compact_layout else 64,
+            min(78 if compact_layout else 96, int(viewport_height * (0.062 if compact_layout else 0.09))),
+        )
         shell.padding = ft.padding.only(
             left=horizontal_padding,
             top=top_padding,
             right=horizontal_padding,
             bottom=vertical_padding,
         )
-        content_width = max(360, min(1460, viewport_width - (horizontal_padding * 2) - 10))
+        content_width = max(
+            320,
+            min(1400 if compact_layout else 1460, viewport_width - (horizontal_padding * 2) - 10),
+        )
+        section_spacing = 12 if compact_layout else 16
+        panel_padding = 14 if compact_layout else 18
+        panel_padding_vertical = 12 if compact_layout else 16
+        main_bottom_padding = 52 if tight_height else (68 if compact_layout else 90)
         apply_main_content.width = content_width
+        apply_main_content.padding = ft.padding.only(bottom=main_bottom_padding)
+        if isinstance(apply_main_content.content, ft.Column):
+            apply_main_content.content.spacing = section_spacing
+        apply_intro_panel.padding = panel_padding
+        apply_paths_panel.padding = panel_padding
+        if isinstance(apply_paths_panel.content, ft.Column):
+            apply_paths_panel.content.spacing = 10 if compact_layout else 12
+        apply_model_panel.padding = ft.padding.symmetric(
+            horizontal=panel_padding,
+            vertical=panel_padding_vertical,
+        )
+        if isinstance(apply_model_panel.content, ft.Column):
+            apply_model_panel.content.spacing = 8 if compact_layout else 10
         for tab_name in ("train", "validation", "history"):
             tab_main_content = lazy_tab_layout_refs[tab_name]["main_content"]
             if tab_main_content is not None:
                 tab_main_content.width = content_width
+        train_intro_panel.padding = panel_padding
+        validation_intro_panel.padding = panel_padding
+
+        if train_main_content_ref is not None:
+            train_main_content_ref.padding = ft.padding.only(bottom=main_bottom_padding)
+            if isinstance(train_main_content_ref.content, ft.Column):
+                train_main_content_ref.content.spacing = section_spacing
+        if train_paths_panel_ref is not None:
+            train_paths_panel_ref.padding = panel_padding
+            if isinstance(train_paths_panel_ref.content, ft.Column):
+                train_paths_panel_ref.content.spacing = 10 if compact_layout else 12
+                if len(train_paths_panel_ref.content.controls) >= 2:
+                    responsive_row = train_paths_panel_ref.content.controls[1]
+                    if isinstance(responsive_row, ft.ResponsiveRow):
+                        train_paths_card_height_dynamic = max(
+                            196,
+                            min(232 if compact_layout else 248, int(viewport_height * (0.22 if compact_layout else 0.26))),
+                        )
+                        for card in responsive_row.controls:
+                            if isinstance(card, ft.Container):
+                                card.height = train_paths_card_height_dynamic
+        if isinstance(train_settings_panel_ref, ft.Container):
+            train_settings_panel_ref.padding = ft.padding.symmetric(
+                horizontal=panel_padding,
+                vertical=panel_padding_vertical,
+            )
+            if isinstance(train_settings_panel_ref.content, ft.Column):
+                train_settings_panel_ref.content.spacing = 10 if compact_layout else 14
+
+        if validation_main_content_ref is not None:
+            validation_main_content_ref.padding = ft.padding.only(bottom=main_bottom_padding)
+            if isinstance(validation_main_content_ref.content, ft.Column):
+                validation_main_content_ref.content.spacing = section_spacing
+        if validation_paths_panel_ref is not None:
+            validation_paths_panel_ref.padding = panel_padding
+            if isinstance(validation_paths_panel_ref.content, ft.Column):
+                validation_paths_panel_ref.content.spacing = 10 if compact_layout else 12
+        if isinstance(validation_preview_panel_ref, ft.Container):
+            validation_preview_panel_ref.padding = ft.padding.symmetric(
+                horizontal=panel_padding,
+                vertical=panel_padding_vertical,
+            )
+            if isinstance(validation_preview_panel_ref.content, ft.Column):
+                validation_preview_panel_ref.content.spacing = 8 if compact_layout else 10
+
+        if history_main_content_ref is not None:
+            history_main_content_ref.padding = ft.padding.only(bottom=main_bottom_padding)
+            if isinstance(history_main_content_ref.content, ft.Column):
+                history_main_content_ref.content.spacing = section_spacing
 
         menu_host_padding = max(8, min(20, int(viewport_width * 0.012)))
         side_menu_host.padding = ft.padding.only(
@@ -7023,7 +7140,10 @@ def main(page: ft.Page) -> None:
             300, min(620, viewport_height - (popup_padding_v * 2) - 220)
         )
 
-        cards_height = max(170, min(240, int(viewport_height * 0.24)))
+        cards_height = max(
+            150 if compact_layout else 170,
+            min(220 if compact_layout else 240, int(viewport_height * (0.20 if compact_layout else 0.24))),
+        )
         apply_preview_card_body.height = cards_height
         apply_feed_card_body.height = cards_height
         train_progress_card_body.height = cards_height
@@ -7031,13 +7151,16 @@ def main(page: ft.Page) -> None:
         validation_progress_card_body.height = cards_height
         validation_feed_card_body.height = cards_height
 
-        batch_table_container.height = max(210, min(430, int(viewport_height * 0.45)))
-        validation_table_container.height = max(210, min(430, int(viewport_height * 0.45)))
-        history_panel_height = max(360, min(720, int(viewport_height * 0.72)))
+        train_log_container.height = max(80, cards_height - 46)
+        validation_log_container.height = max(80, cards_height - 46)
+        batch_table_container.height = max(180, min(400, int(viewport_height * 0.40)))
+        validation_table_container.height = max(180, min(400, int(viewport_height * 0.40)))
+        history_panel_height = max(
+            300 if compact_layout else 360,
+            min(680 if compact_layout else 720, int(viewport_height * (0.64 if compact_layout else 0.72))),
+        )
         history_table_container.height = history_panel_height
         history_details_container.height = history_panel_height
-        train_log_container.height = max(96, cards_height - 56)
-        validation_log_container.height = max(96, cards_height - 56)
 
         apply_run_badge.right = 12 if viewport_width < 900 else 24
         apply_run_badge.bottom = 12 if viewport_height < 760 else 20
@@ -7047,11 +7170,23 @@ def main(page: ft.Page) -> None:
                 tab_badge.right = 12 if viewport_width < 900 else 24
                 tab_badge.bottom = 12 if viewport_height < 760 else 20
 
-    def on_page_resize(_: ft.ControlEvent) -> None:
+    async def _stabilize_initial_layout() -> None:
+        last_size = (-1, -1)
+        for delay_seconds in (0.05, 0.20, 0.75):
+            await asyncio.sleep(delay_seconds)
+            current_size = _current_viewport_size()
+            if current_size == last_size:
+                continue
+            last_size = current_size
+            _apply_responsive_layout()
+            request_ui_refresh(force=True)
+
+    def on_page_resize(_: ft.ControlEvent | None = None) -> None:
         _apply_responsive_layout()
         request_ui_refresh()
 
-    page.on_resized = on_page_resize
+    page.on_resize = on_page_resize
+    page.on_media_change = on_page_resize
     page.on_keyboard_event = on_page_keyboard
     _apply_responsive_layout()
 
@@ -7142,6 +7277,7 @@ def main(page: ft.Page) -> None:
         "Ready. Select validation dataset and model to export predictions and metrics CSV files.",
     )
     page.update()
+    page.run_task(_stabilize_initial_layout)
     _close_startup_splash()
     page.run_task(_run_startup_update_check)
 

@@ -1072,6 +1072,7 @@ missing module named shapely.has_z - imported by shapely (delayed), shapely._rag
 missing module named shapely.has_m - imported by shapely (delayed), shapely._ragged_array (delayed)
 missing module named 'shapely._buildcfg' - imported by geopandas.tools._show_versions (delayed, optional)
 missing module named geoalchemy2 - imported by geopandas.io.sql (delayed, optional)
+missing module named torch_directml - imported by apply_ICECREAMS (delayed, optional)
 missing module named socksio - imported by httpcore._sync.socks_proxy (top-level), httpcore._async.socks_proxy (top-level), httpx._transports.default (delayed, conditional, optional)
 missing module named 'h2.settings' - imported by httpcore._sync.http2 (top-level), httpcore._async.http2 (top-level)
 missing module named 'h2.exceptions' - imported by httpcore._sync.http2 (top-level), httpcore._async.http2 (top-level)

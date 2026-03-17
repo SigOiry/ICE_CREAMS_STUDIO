@@ -194,10 +194,121 @@ OUT_CLASS_QGIS_STYLE: dict[int, tuple[str, str]] = {
     8: ("Water", "#3d2fff"),
 }
 
-DEFAULT_DASK_WORKERS = max(1, min(os.cpu_count() or 1, 8))
+DEFAULT_DASK_WORKERS = max(1, os.cpu_count() or 1)
 DEFAULT_CLASSIFICATION_BATCH_SIZE = 8192
 MASK_EXTENT_BUFFER_DISTANCE = 60.0
 _MODEL_CACHE: dict[str, tuple[float, object]] = {}
+_INFERENCE_DEVICE: tuple | None = None  # (device, label_str) — populated on first use
+
+
+# Substrings (lower-case) that identify integrated or software-renderer adapters.
+# Discrete GPUs are preferred; these are skipped when a better option exists.
+_INTEGRATED_GPU_MARKERS = (
+    "intel uhd",
+    "intel iris",
+    "intel hd graphics",
+    "intel(r) uhd",
+    "intel(r) iris",
+    "intel(r) hd",
+    "amd radeon(tm) graphics",   # AMD integrated (Ryzen APU, no model number)
+    "amd radeon(tm) vega",       # older AMD APU integrated
+    "microsoft basic render",    # Windows software renderer
+    "microsoft warp",            # Windows software rasterizer
+)
+
+
+def _best_directml_index() -> int:
+    """Return the DirectML adapter index that is most likely a discrete GPU.
+
+    Windows enumerates adapters in DXGI order — the integrated GPU is almost
+    always index 0.  We score each adapter by whether its name matches known
+    integrated-GPU patterns and return the highest-scoring index, falling back
+    to 0 when no name information is available.
+    """
+    import torch_directml
+
+    count = torch_directml.device_count()
+    if count <= 1:
+        return 0
+
+    has_name = hasattr(torch_directml, "device_name")
+    best_score, best_idx = -1, 0
+    for i in range(count):
+        name = (torch_directml.device_name(i) if has_name else "").lower()
+        is_integrated = any(marker in name for marker in _INTEGRATED_GPU_MARKERS)
+        score = 0 if is_integrated else 1
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
+
+
+def _detect_inference_device() -> tuple:
+    """Detect the best available compute device for PyTorch inference.
+
+    Priority: NVIDIA CUDA → AMD/Intel DirectML → CPU.
+    For CUDA, the GPU with the most VRAM is chosen (avoids picking an
+    integrated or low-end secondary card on multi-GPU machines).
+    For DirectML, integrated adapters are skipped in favour of discrete ones.
+    Result is cached for the lifetime of the process so detection runs only once.
+    Returns (device, human-readable label).
+    """
+    global _INFERENCE_DEVICE
+    if _INFERENCE_DEVICE is not None:
+        return _INFERENCE_DEVICE
+
+    import torch
+
+    if torch.cuda.is_available():
+        # Pick the CUDA device with the most dedicated VRAM.
+        best_idx = max(
+            range(torch.cuda.device_count()),
+            key=lambda i: torch.cuda.get_device_properties(i).total_memory,
+        )
+        device = torch.device(f"cuda:{best_idx}")
+        label = f"CUDA ({torch.cuda.get_device_name(best_idx)})"
+        _INFERENCE_DEVICE = (device, label)
+        return _INFERENCE_DEVICE
+
+    try:
+        import torch_directml  # optional: pip install torch-directml
+        if torch_directml.device_count() > 0:
+            best_idx = _best_directml_index()
+            device = torch_directml.device(best_idx)
+            device_name = (
+                torch_directml.device_name(best_idx)
+                if hasattr(torch_directml, "device_name")
+                else "AMD/Intel GPU"
+            )
+            label = f"DirectML ({device_name})"
+            _INFERENCE_DEVICE = (device, label)
+            return _INFERENCE_DEVICE
+    except Exception:
+        pass
+
+    n_threads = os.cpu_count() or 1
+    torch.set_num_threads(n_threads)
+    device = torch.device("cpu")
+    label = f"CPU ({n_threads} thread{'s' if n_threads != 1 else ''})"
+    _INFERENCE_DEVICE = (device, label)
+    return _INFERENCE_DEVICE
+
+
+def _optimal_batch_size(device) -> int:
+    """Return an inference batch size suited to the compute device.
+
+    GPU devices benefit from very large batches to maximise kernel utilisation.
+    CPU inference still benefits from larger batches vs the 8 192 default by
+    reducing DataLoader iteration overhead.
+    """
+    try:
+        device_type = device.type.lower()
+    except AttributeError:
+        device_type = str(device).lower()
+    # "cuda" = NVIDIA, "privateuseone" = torch-directml (AMD/Intel)
+    if "cuda" in device_type or "privateuseone" in device_type:
+        return 131072
+    return 65536
 _S2_SCENE_ID_PATTERN = re.compile(
     r"^S2[A-Z]_MSIL[12][AC]?_\d{8}T\d{6}_N\d{4}_R\d{3}_T[0-9A-Z]{5}_\d{8}T\d{6}$",
     re.IGNORECASE,
@@ -514,15 +625,52 @@ def _cleanup_temp_dir(
             time.sleep(0.35 * (attempt + 1))
 
 
-def _load_cached_learner(saved_model: str):
-    """Reuse a loaded learner when the same model file is used repeatedly."""
+def _load_cached_learner(
+    saved_model: str,
+    status_callback: Callable[[str], None] | None = None,
+):
+    """Load a FastAI learner, place it on the best available device, and cache it."""
+    import torch
+
     model_path = os.path.abspath(saved_model)
     model_mtime = os.path.getmtime(model_path)
     cached_entry = _MODEL_CACHE.get(model_path)
     if cached_entry and cached_entry[0] == model_mtime:
         return cached_entry[1]
 
-    learner = load_learner(model_path)
+    # Always load to CPU first so the file works regardless of the device it
+    # was originally saved on (avoids CUDA/CPU mismatch errors on load).
+    learner = load_learner(model_path, cpu=True)
+
+    device, device_label = _detect_inference_device()
+    _emit_status(status_callback, f"Inference device: {device_label}")
+
+    try:
+        learner.dls.device = device
+        learner.model = learner.model.to(device)
+    except Exception as exc:
+        _emit_status(
+            status_callback,
+            f"Warning: could not move model to {device_label} ({exc}); falling back to CPU",
+        )
+        device = torch.device("cpu")
+        learner.dls.device = device
+        learner.model = learner.model.to(device)
+
+    # JIT-compile the model for additional throughput where supported.
+    # torch.compile() is lazy: the actual C++ kernel compilation happens at the
+    # first forward pass (inside get_preds), not here.  On Windows the Inductor
+    # backend requires MSVC's cl.exe; if it is absent the deferred error would
+    # surface mid-inference and kill the run.  We check for cl.exe first so the
+    # skip happens silently before any work is done.
+    _compile_supported = sys.platform != "win32" or bool(shutil.which("cl"))
+    if _compile_supported:
+        try:
+            learner.model = torch.compile(learner.model)
+            _emit_status(status_callback, "Model JIT-compiled with torch.compile()")
+        except Exception:
+            pass
+
     _MODEL_CACHE[model_path] = (model_mtime, learner)
     return learner
 
@@ -1425,7 +1573,7 @@ def calc_spc(s2_data_raw):
 def apply_classification(
     input_xarray,
     class_model,
-    batch_size: int = DEFAULT_CLASSIFICATION_BATCH_SIZE,
+    batch_size: int | None = None,
     dask_workers: int = DEFAULT_DASK_WORKERS,
     status_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[float], None] | None = None,
@@ -1434,7 +1582,17 @@ def apply_classification(
     Apply classification to a list of input xarray DataArrays
     """
     worker_count = max(1, int(dask_workers))
-    inference_batch_size = max(1, int(batch_size))
+
+    if batch_size is None:
+        try:
+            import torch
+            _model_device = next(class_model.model.parameters()).device
+        except Exception:
+            import torch
+            _model_device = torch.device("cpu")
+        inference_batch_size = _optimal_batch_size(_model_device)
+    else:
+        inference_batch_size = max(1, int(batch_size))
 
     stacked_data = input_xarray.stack(pixel=("y", "x")).squeeze(dim="band", drop=True)
     pixel_template = stacked_data["Reflectance_B01"]
@@ -1536,7 +1694,7 @@ def classify_s2_scene(
     else:
         _emit_status(status_callback, f"Loading model from {saved_model}")
         _emit_progress(progress_callback, 0.05)
-        class_model = _load_cached_learner(saved_model)
+        class_model = _load_cached_learner(saved_model, status_callback=status_callback)
         _emit_progress(progress_callback, 0.12)
 
     # Keep the extracted zip contents alive for the full workflow.

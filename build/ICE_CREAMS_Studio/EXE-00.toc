@@ -94,7 +94,7 @@
  [],
  False,
  False,
- 1773743488,
+ 1773746839,
  [('run.exe',
    'C:\\Users\\Simon\\miniconda3\\envs\\ICE_CREAMS\\Lib\\site-packages\\PyInstaller\\bootloader\\Windows-64bit-intel\\run.exe',
    'EXECUTABLE')],
