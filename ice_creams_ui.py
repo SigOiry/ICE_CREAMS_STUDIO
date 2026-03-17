@@ -51,7 +51,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -1141,6 +1141,31 @@ def main(page: ft.Page) -> None:
             )
         ],
         content=ft.Text("About", size=14, weight=ft.FontWeight.W_800, color="#10253B"),
+    )
+    menu_update_button = ft.Container(
+        right=22,
+        top=74,
+        visible=False,
+        border_radius=999,
+        padding=ft.padding.symmetric(horizontal=14, vertical=10),
+        bgcolor=ft.Colors.with_opacity(0.88, "#D4F7E3"),
+        border=ft.border.all(1, ft.Colors.with_opacity(0.68, ft.Colors.WHITE)),
+        shadow=[
+            ft.BoxShadow(
+                blur_radius=14,
+                spread_radius=0,
+                color=ft.Colors.with_opacity(0.20, "#1F6E52"),
+                offset=(0, 4),
+            )
+        ],
+        content=ft.Row(
+            tight=True,
+            spacing=6,
+            controls=[
+                ft.Icon(ft.Icons.SYSTEM_UPDATE_ALT, size=16, color="#103B2F"),
+                ft.Text("Check updates", size=13, weight=ft.FontWeight.W_800, color="#103B2F"),
+            ],
+        ),
     )
     about_popup_blocker = ft.Container()
     update_popup_title = ft.Text(
@@ -2451,7 +2476,7 @@ def main(page: ft.Page) -> None:
             except Exception:
                 continue
 
-    async def _run_startup_update_check() -> None:
+    async def _run_update_check(*, interactive: bool = False) -> None:
         if update_state["check_running"] or update_state["install_running"]:
             return
 
@@ -2464,8 +2489,11 @@ def main(page: ft.Page) -> None:
 
         try:
             manifest = await asyncio.to_thread(_fetch_update_manifest)
-        except Exception:
-            if not state["busy"] and not update_popup_blocker.visible:
+        except Exception as exc:
+            if interactive and not state["busy"]:
+                set_app_status("error", f"Update check failed: {exc}")
+                request_ui_refresh(force=True)
+            elif not state["busy"] and not update_popup_blocker.visible:
                 report_idle(previous_status)
                 request_ui_refresh(force=True)
             return
@@ -2475,7 +2503,10 @@ def main(page: ft.Page) -> None:
         latest_version = _manifest_string(manifest, "version")
         if not latest_version or not _is_newer_version(latest_version, APP_VERSION):
             update_state["manifest"] = None
-            if not state["busy"] and not update_popup_blocker.visible:
+            if interactive and not state["busy"]:
+                set_app_status("ready", f"ICE CREAMS Studio {APP_VERSION} is up to date.")
+                request_ui_refresh(force=True)
+            elif not state["busy"] and not update_popup_blocker.visible:
                 report_idle(previous_status)
                 request_ui_refresh(force=True)
             return
@@ -2484,6 +2515,15 @@ def main(page: ft.Page) -> None:
             set_app_status("ready", f"Version {latest_version} is available.")
         show_update_popup(manifest)
         request_ui_refresh(force=True)
+
+    async def _run_startup_update_check() -> None:
+        await _run_update_check(interactive=False)
+
+    async def _run_manual_update_check() -> None:
+        await _run_update_check(interactive=True)
+
+    def trigger_manual_update_check(_: ft.ControlEvent | None = None) -> None:
+        page.run_task(_run_manual_update_check)
 
     async def run_update_install(_: ft.ControlEvent | None = None) -> None:
         if update_state["install_running"]:
@@ -2959,6 +2999,7 @@ def main(page: ft.Page) -> None:
     update_popup_later_button.on_click = close_update_popup
     update_popup_install_button.on_click = run_update_install
     menu_about_button.on_click = show_about_popup
+    menu_update_button.on_click = trigger_manual_update_check
 
     def _history_string(value: object) -> str:
         return str(value).strip() if value is not None else ""
@@ -3931,6 +3972,7 @@ def main(page: ft.Page) -> None:
             side_menu_backdrop,
             menu_toggle_badge,
             menu_about_button,
+            menu_update_button,
             overlay_blocker,
             about_popup_blocker,
             update_popup_blocker,
@@ -6151,7 +6193,14 @@ def main(page: ft.Page) -> None:
         set_active_tab(tab_name, refresh=False)
         set_menu_open(False, refresh=False)
         _apply_responsive_layout()
-        _refresh_ui_surface(active_view_host, side_menu_backdrop, side_menu_overlay, menu_about_button, menu_toggle_badge)
+        _refresh_ui_surface(
+            active_view_host,
+            side_menu_backdrop,
+            side_menu_overlay,
+            menu_about_button,
+            menu_update_button,
+            menu_toggle_badge,
+        )
 
     apply_tab_button = ft.Container(
         border_radius=14,
@@ -6298,6 +6347,7 @@ def main(page: ft.Page) -> None:
         side_menu_backdrop.visible = is_open
         side_menu_overlay.visible = is_open
         menu_about_button.visible = is_open
+        menu_update_button.visible = is_open
         if not is_open:
             about_popup_blocker.visible = False
         menu_toggle_icon.name = ft.Icons.CLOSE if is_open else ft.Icons.MENU
@@ -6313,7 +6363,13 @@ def main(page: ft.Page) -> None:
             ft.Colors.with_opacity(0.62 if is_open else 0.42, ft.Colors.WHITE),
         )
         if refresh:
-            _refresh_ui_surface(side_menu_backdrop, side_menu_overlay, menu_about_button, menu_toggle_badge)
+            _refresh_ui_surface(
+                side_menu_backdrop,
+                side_menu_overlay,
+                menu_about_button,
+                menu_update_button,
+                menu_toggle_badge,
+            )
 
     def set_active_tab(tab_name: str, refresh: bool = True) -> None:
         resolved_tab_name = tab_name if tab_name in tab_view_builders else "apply"
@@ -6921,6 +6977,9 @@ def main(page: ft.Page) -> None:
         menu_about_button.right = 10 if viewport_width < 900 else 20
         menu_about_button.top = menu_toggle_badge.top
         menu_about_button.visible = menu_state["open"]
+        menu_update_button.right = menu_about_button.right
+        menu_update_button.top = menu_about_button.top + 56
+        menu_update_button.visible = menu_state["open"]
 
         popup_padding_h = max(10, min(24, int(viewport_width * 0.018)))
         popup_padding_v = max(10, min(22, int(viewport_height * 0.018)))
@@ -7058,6 +7117,7 @@ def main(page: ft.Page) -> None:
                 side_menu_backdrop,
                 side_menu_overlay,
                 menu_about_button,
+                menu_update_button,
                 about_popup_blocker,
                 update_popup_blocker,
                 batch_popup_blocker,

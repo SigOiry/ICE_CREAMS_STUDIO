@@ -2,7 +2,7 @@
   #define AppName "ICE CREAMS Studio"
 #endif
 #ifndef AppVersion
-#define AppVersion "1.0.12"
+#define AppVersion "1.0.13"
 #endif
 #ifndef AppDirName
   #define AppDirName "ICE_CREAMS_Studio"
