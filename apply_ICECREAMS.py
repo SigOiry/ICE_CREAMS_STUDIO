@@ -171,10 +171,14 @@ from ice_creams_feature_modes import (
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
     RAW_BANDS_BY_MODE,
     SPECTRAL_RAW_BANDS,
-    feature_mode_label,
-    infer_feature_mode_from_learner,
     prepare_feature_dataframe,
     raw_column_name,
+)
+from ice_creams_model_families import (
+    extract_model_metadata,
+    predict_model_probabilities,
+    prepare_sequence_feature_dataframe,
+    spectral_cnn_sequence_input_label,
 )
 
 ## Update .pkl file as new version becomes available.
@@ -208,6 +212,9 @@ OUT_CLASS_QGIS_STYLE: dict[int, tuple[str, str]] = {
 DEFAULT_DASK_WORKERS = max(1, os.cpu_count() or 1)
 DEFAULT_CLASSIFICATION_BATCH_SIZE = 8192
 MASK_EXTENT_BUFFER_DISTANCE = 60.0
+CLASS4_TO_CLASS5_NDVI_THRESHOLD = 0.25
+MODEL_CLASS_INDEX_4 = 3
+MODEL_CLASS_INDEX_5 = 4
 _MODEL_CACHE: dict[str, tuple[float, object]] = {}
 _INFERENCE_DEVICE: tuple | None = None  # (device, label_str) — populated on first use
 S2_RAW_BAND_FILE_PATTERNS: dict[str, str] = {
@@ -1712,11 +1719,33 @@ def calc_spc(ndvi):
     return spc
 
 
+def apply_post_classification_rules(
+    predicted_classes: numpy.ndarray,
+    ndvi_values: numpy.ndarray,
+) -> tuple[numpy.ndarray, numpy.ndarray]:
+    """
+    Apply deterministic post-processing rules to zero-based class predictions.
+
+    Rule: when a pixel is predicted as output Class 4 (zero-based index 3) and
+    NDVI is below 0.25, reclassify it to output Class 5 (zero-based index 4).
+    Returns the updated classes plus a mask of reclassified pixels.
+    """
+    updated_classes = numpy.asarray(predicted_classes, dtype=numpy.int16).copy()
+    ndvi_array = numpy.asarray(ndvi_values, dtype=numpy.float32)
+    reclassified_mask = (
+        (updated_classes == MODEL_CLASS_INDEX_4)
+        & numpy.isfinite(ndvi_array)
+        & (ndvi_array < CLASS4_TO_CLASS5_NDVI_THRESHOLD)
+    )
+    if reclassified_mask.any():
+        updated_classes[reclassified_mask] = MODEL_CLASS_INDEX_5
+    return updated_classes, reclassified_mask
+
+
 def apply_classification(
     input_xarray,
     class_model,
-    feature_mode: str,
-    required_feature_names: list[str] | tuple[str, ...],
+    model_metadata: dict[str, object],
     batch_size: int | None = None,
     dask_workers: int = DEFAULT_DASK_WORKERS,
     status_callback: Callable[[str], None] | None = None,
@@ -1726,6 +1755,9 @@ def apply_classification(
     Apply classification to a list of input xarray DataArrays
     """
     worker_count = max(1, int(dask_workers))
+    detected_model_family = str(model_metadata["model_family"])
+    feature_mode = str(model_metadata["feature_mode"])
+    required_feature_names = list(model_metadata["required_feature_names"])
 
     if batch_size is None:
         try:
@@ -1781,41 +1813,59 @@ def apply_classification(
         raw_feature_df = pandas.DataFrame(
             {var: valid_pixels_computed[var].values for var in valid_pixels_computed.data_vars}
         )
-        valid_df = prepare_feature_dataframe(
-            raw_feature_df,
-            feature_mode=feature_mode,
-            required_feature_names=required_feature_names,
-            context="Apply pixel dataframe",
-            rebuild_standardised=True,
-            rebuild_indices=True,
-        ).fillna(0)
+        if detected_model_family == "spectral_1d_cnn":
+            valid_df = prepare_sequence_feature_dataframe(
+                raw_feature_df,
+                feature_mode=feature_mode,
+                sequence_feature_names=model_metadata.get("sequence_feature_names"),
+                sequence_channel_feature_names=model_metadata.get("sequence_channel_feature_names"),
+                context="Apply pixel dataframe",
+            )
+        else:
+            valid_df = prepare_feature_dataframe(
+                raw_feature_df,
+                feature_mode=feature_mode,
+                required_feature_names=required_feature_names,
+                context="Apply pixel dataframe",
+                rebuild_standardised=True,
+                rebuild_indices=True,
+            ).fillna(0)
 
         _emit_status(
             status_callback,
             f"Running model inference on {len(valid_df):,} pixel(s)",
         )
         _emit_progress(progress_callback, 0.76)
-        out_class_dl = class_model.dls.test_dl(valid_df, bs=inference_batch_size)
-        preds, _ = class_model.get_preds(
-            dl=out_class_dl
-        )  # This creates a tensor with 9 prediction classes 0:8
+        preds = predict_model_probabilities(
+            class_model,
+            valid_df,
+            model_metadata,
+            batch_size=inference_batch_size,
+        )
 
         predicted_classes = preds.argmax(dim=1).cpu().numpy().astype(numpy.int16)
         predicted_probs = preds.max(dim=1).values.cpu().numpy().astype(numpy.float32)
+        ndvi_values = raw_feature_df["NDVI"].to_numpy(dtype=numpy.float32, copy=True)
+        predicted_classes, reclassified_mask = apply_post_classification_rules(
+            predicted_classes,
+            ndvi_values,
+        )
 
         spc_values = raw_feature_df["SPC"].to_numpy(dtype=numpy.float32, copy=True)
         spc_values = numpy.clip(spc_values, 0, 100)
         seagrass_mask = (predicted_classes == 3) & (spc_values >= 20)
         spc20_values = numpy.where(seagrass_mask, spc_values, -1.0).astype(numpy.float32)
+        if reclassified_mask.any():
+            spc20_values[reclassified_mask] = -1.0
 
         _emit_status(status_callback, "Assembling classification rasters")
         _emit_progress(progress_callback, 0.84)
         out_class_values[valid_positions] = predicted_classes + 1
         class_probs_values[valid_positions] = predicted_probs
         seagrass_cover_values[valid_positions] = spc20_values
-        # Extract NDVI eagerly from valid_df (already computed as part of to_dataframe()).
-        # This avoids re-reading B04/B08/SCL from disk during the COG write step.
-        ndvi_out_values[valid_positions] = valid_df["NDVI"].to_numpy(dtype=numpy.float32, copy=True)
+        # Extract NDVI eagerly from the already-loaded raw feature table so both
+        # tabular and spectral-CNN models write the same NDVI output layer.
+        ndvi_out_values[valid_positions] = ndvi_values
 
     output_vars = {}
     band_coord = input_xarray[pixel_template_name].coords["band"]
@@ -1871,13 +1921,28 @@ def classify_s2_scene(
         _emit_progress(progress_callback, 0.05)
         class_model = _load_cached_learner(saved_model, status_callback=status_callback)
         _emit_progress(progress_callback, 0.12)
-    detected_feature_mode, required_feature_names = infer_feature_mode_from_learner(class_model)
-    detected_feature_mode_label = feature_mode_label(detected_feature_mode)
+    model_metadata = extract_model_metadata(class_model)
+    detected_model_family = str(model_metadata["model_family"])
+    detected_model_family_label = str(model_metadata["model_family_label"])
+    detected_feature_mode = str(model_metadata["feature_mode"])
+    detected_feature_mode_label = str(model_metadata["feature_mode_label"])
     required_raw_bands = RAW_BANDS_BY_MODE[detected_feature_mode]
+    _emit_status(
+        status_callback,
+        f"Detected model method: {detected_model_family_label}",
+    )
     _emit_status(
         status_callback,
         f"Detected model feature mode: {detected_feature_mode_label}",
     )
+    if detected_model_family == "spectral_1d_cnn":
+        _emit_status(
+            status_callback,
+            (
+                "Detected spectral inputs: "
+                f"{spectral_cnn_sequence_input_label(model_metadata.get('sequence_use_standardized_reflectance'))}"
+            ),
+        )
 
     # Keep the extracted zip contents alive for the full workflow.
     with _prepare_s2_scene_input(input_s2_safe, status_callback) as resolved_scene_path:
@@ -1931,8 +1996,7 @@ def classify_s2_scene(
             Out_Classified_s2_data = apply_classification(
                 s2_data,
                 class_model,
-                detected_feature_mode,
-                required_feature_names,
+                model_metadata,
                 status_callback=status_callback,
                 progress_callback=progress_callback,
             )
@@ -1985,7 +2049,10 @@ def classify_s2_scene(
             _emit_progress(progress_callback, 1.0)
             _emit_status(
                 status_callback,
-                f"Completed ({detected_feature_mode_label}). Output saved to {output_gtiff}",
+                (
+                    f"Completed ({detected_model_family_label}, {detected_feature_mode_label}). "
+                    f"Output saved to {output_gtiff}"
+                ),
             )
             return output_gtiff
         finally:

@@ -1,28 +1,26 @@
 # Patch Notes
 
-## Version 1.0.22 - 2026-04-01
+## Version 1.0.23 - 2026-04-01
 
 ### Added
 
-- Added a training mode selector with `High Spatial Accuracy` and `High Spectral Complexity`
-- Added automatic feature-mode inference from exported FastAI model inputs for Apply and Validation
-- Added support for 12-band multi-band `.tif` and `.tiff` apply inputs
-- Added automatic refresh of the Apply and Validation model lists after training a new model
-- Added backend unittest coverage for feature-mode preprocessing and TIFF input discovery
+- Added an optional `Spectral 1D CNN` training method alongside the legacy tabular dense network
+- Added a Train-tab option to include standardized reflectance as an extra spectral CNN input channel
+- Added automatic model-family and spectral-input-layout detection for Apply and Validation
+- Added backend tests covering raw-only and raw-plus-standardized spectral CNN metadata and inference
 
 ### Changed
 
-- Training now saves new models automatically into the default `models` folder
-- High Spatial Accuracy training, validation, and apply runs now rebuild standardized `B02/B03/B04/B08`, `NDVI`, and `NDWI` from the raw 10 m bands
-- High Spectral Complexity training now uses the intended spectral feature set explicitly instead of allowing unrelated CSV columns into the learner
-- Apply no longer depends on `Reflectance_B01` when building masks, templates, or band coordinates
-- The in-app update manifest now points to the `1.0.22` installer and patch notes
+- Newly trained spectral CNN models now store whether they use raw reflectance only or raw plus standardized reflectance
+- Apply and Validation now surface the detected model method, feature mode, and spectral input layout in their status text and run history
+- The packaged desktop release has been rebuilt against the current `models` folder contents for version `1.0.23`
 
 ### Fixed
 
-- Fixed the spatial-mode training failure caused by duplicate derived columns producing the pandas ambiguous-Series error
+- Fixed spectral CNN apply and validation compatibility so both older raw-only exports and newer raw-plus-standardized exports run without a manual override
+- Fixed apply post-processing so any output `Class 4` pixel with `NDVI < 0.25` is reclassified to `Class 5` and receives `SPC = -1`
 
 ### Notes
 
-- TIFF apply inputs are expected to contain the 12 Sentinel-2 spectral bands on a shared grid, so no spatial resampling is performed
-- SCL masking remains available for SAFE inputs; TIFF inputs run without an SCL mask because that layer is not present in the raster stack
+- Spectral CNN models remain pixel-wise classifiers; they do not use neighboring pixels or spatial patches
+- Packaged models from the `models` folder are bundled into the desktop app and installer for this release

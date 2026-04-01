@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate an ICE CREAMS fastai tabular model on a labelled table."""
+"""Validate an ICE CREAMS exported model on a labelled table."""
 
 from __future__ import annotations
 
@@ -14,9 +14,13 @@ import pandas as pd
 from fastai.tabular.all import load_learner
 
 from ice_creams_feature_modes import (
-    feature_mode_label,
-    infer_feature_mode_from_learner,
     prepare_feature_dataframe,
+)
+from ice_creams_model_families import (
+    extract_model_metadata,
+    predict_model_probabilities,
+    prepare_sequence_feature_dataframe,
+    spectral_cnn_sequence_input_label,
 )
 
 
@@ -519,27 +523,56 @@ def validate_model(
 
     _emit_status(status_callback, f"Loading model: {model_file.name}")
     learner = load_learner(str(model_file))
-    detected_feature_mode, required_features = infer_feature_mode_from_learner(learner)
-    detected_feature_mode_label = feature_mode_label(detected_feature_mode)
+    model_metadata = extract_model_metadata(learner)
+    detected_model_family = str(model_metadata["model_family"])
+    detected_model_family_label = str(model_metadata["model_family_label"])
+    detected_feature_mode = str(model_metadata["feature_mode"])
+    detected_feature_mode_label = str(model_metadata["feature_mode_label"])
+    required_features = list(model_metadata["required_feature_names"])
+    _emit_status(
+        status_callback,
+        f"Detected model method: {detected_model_family_label}",
+    )
     _emit_status(
         status_callback,
         f"Detected model feature mode: {detected_feature_mode_label}",
     )
+    if detected_model_family == "spectral_1d_cnn":
+        _emit_status(
+            status_callback,
+            (
+                "Detected spectral inputs: "
+                f"{spectral_cnn_sequence_input_label(model_metadata.get('sequence_use_standardized_reflectance'))}"
+            ),
+        )
     _emit_progress(progress_callback, 0.32)
 
     _emit_status(status_callback, "Checking required feature columns")
-    validation_model_df = prepare_feature_dataframe(
-        validation_df,
-        feature_mode=detected_feature_mode,
-        required_feature_names=required_features,
-        context="Validation dataset",
-    )
+    if detected_model_family == "spectral_1d_cnn":
+        validation_model_df = prepare_sequence_feature_dataframe(
+            validation_df,
+            feature_mode=detected_feature_mode,
+            sequence_feature_names=model_metadata.get("sequence_feature_names"),
+            sequence_channel_feature_names=model_metadata.get("sequence_channel_feature_names"),
+            context="Validation dataset",
+        )
+    else:
+        validation_model_df = prepare_feature_dataframe(
+            validation_df,
+            feature_mode=detected_feature_mode,
+            required_feature_names=required_features,
+            context="Validation dataset",
+        )
     _emit_progress(progress_callback, 0.42)
 
     _emit_status(status_callback, "Running model predictions")
     batch_size = max(512, min(8192, len(validation_model_df)))
-    test_dl = learner.dls.test_dl(validation_model_df, bs=batch_size)
-    preds, _ = learner.get_preds(dl=test_dl)
+    preds = predict_model_probabilities(
+        learner,
+        validation_model_df,
+        model_metadata,
+        batch_size=batch_size,
+    )
     _emit_progress(progress_callback, 0.74)
 
     class_indices = preds.argmax(dim=1).cpu().numpy().astype(int)
@@ -666,8 +699,14 @@ def validate_model(
         "predictions_outside_validation_classes": predictions_outside_validation_space,
         "validation_mode": mode_name,
         "target_class": target_class_name,
+        "model_family": detected_model_family,
+        "model_family_label": detected_model_family_label,
         "feature_mode": detected_feature_mode,
         "feature_mode_label": detected_feature_mode_label,
+        "sequence_use_standardized_reflectance": bool(
+            model_metadata.get("sequence_use_standardized_reflectance", False)
+        ),
+        "sequence_input_label": str(model_metadata.get("sequence_input_label") or ""),
     }
 
 

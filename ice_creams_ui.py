@@ -47,6 +47,13 @@ from ice_creams_feature_modes import (
     feature_mode_label,
     normalize_feature_mode,
 )
+from ice_creams_model_families import (
+    DEFAULT_SPECTRAL_CNN_USE_STANDARDIZED_REFLECTANCE,
+    MODEL_FAMILY_SPECTRAL_1D_CNN,
+    MODEL_FAMILY_TABULAR_DENSE,
+    model_family_label,
+    spectral_cnn_sequence_input_label,
+)
 
 # Keep terminal output clean on current Flet versions.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -58,7 +65,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.22"
+APP_VERSION = "1.0.23"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -1641,6 +1648,21 @@ def main(page: ft.Page) -> None:
         text_size=14,
         height=56,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
+    )
+    training_spectral_cnn_checkbox = ft.Checkbox(
+        value=False,
+        label="Train as Spectral 1D CNN",
+        active_color=LIQUID_ACCENT,
+        check_color=ft.Colors.WHITE,
+        label_style=ft.TextStyle(size=13, color=LIQUID_TEXT, weight=ft.FontWeight.W_500),
+    )
+    training_sequence_standardization_checkbox = ft.Checkbox(
+        value=DEFAULT_SPECTRAL_CNN_USE_STANDARDIZED_REFLECTANCE,
+        label="Include Standardized Reflectance Channel",
+        active_color=LIQUID_ACCENT,
+        check_color=ft.Colors.WHITE,
+        label_style=ft.TextStyle(size=13, color=LIQUID_TEXT, weight=ft.FontWeight.W_500),
+        disabled=True,
     )
 
     train_progress = ft.ProgressBar(
@@ -4195,6 +4217,10 @@ def main(page: ft.Page) -> None:
                 continue
         if not is_busy:
             try:
+                sync_training_model_controls(refresh=False)
+            except NameError:
+                pass
+            try:
                 sync_validation_mode_controls(refresh=False)
             except NameError:
                 pass
@@ -4658,13 +4684,57 @@ def main(page: ft.Page) -> None:
         _, selected_mode_label = resolved
         push_train_status(f"Training feature mode set to {selected_mode_label}.")
 
-    def parse_training_inputs() -> tuple[int, float, str, str] | None:
+    def resolve_training_model_family() -> tuple[str, str]:
+        resolved_family = (
+            MODEL_FAMILY_SPECTRAL_1D_CNN
+            if bool(training_spectral_cnn_checkbox.value)
+            else MODEL_FAMILY_TABULAR_DENSE
+        )
+        return resolved_family, model_family_label(resolved_family)
+
+    def resolve_training_sequence_standardization() -> tuple[bool, str]:
+        use_standardized_reflectance = bool(training_sequence_standardization_checkbox.value)
+        return (
+            use_standardized_reflectance,
+            spectral_cnn_sequence_input_label(use_standardized_reflectance),
+        )
+
+    def sync_training_model_controls(refresh: bool = True) -> None:
+        model_family_value, _ = resolve_training_model_family()
+        is_spectral_cnn = model_family_value == MODEL_FAMILY_SPECTRAL_1D_CNN
+        training_sequence_standardization_checkbox.disabled = not is_spectral_cnn
+        if refresh:
+            request_ui_refresh()
+
+    def on_training_model_family_toggle(_: ft.ControlEvent) -> None:
+        _, selected_family_label = resolve_training_model_family()
+        sync_training_model_controls(refresh=False)
+        if bool(training_spectral_cnn_checkbox.value):
+            _, sequence_input_label = resolve_training_sequence_standardization()
+            push_train_status(
+                f"Training model method set to {selected_family_label}. Spectral inputs: {sequence_input_label}."
+            )
+        else:
+            push_train_status(f"Training model method set to {selected_family_label}.")
+        request_ui_refresh()
+
+    def on_training_sequence_standardization_toggle(_: ft.ControlEvent) -> None:
+        selected_family_value, _ = resolve_training_model_family()
+        if selected_family_value == MODEL_FAMILY_SPECTRAL_1D_CNN:
+            _, sequence_input_label = resolve_training_sequence_standardization()
+            push_train_status(f"Spectral CNN inputs set to {sequence_input_label}.")
+        else:
+            push_train_status("Standardized reflectance is only used by the Spectral 1D CNN.", level="warning")
+
+    def parse_training_inputs() -> tuple[int, float, str, str, str, str, bool, str] | None:
         epochs_raw = (training_epochs_field.value or "").strip()
         split_raw = (training_split_field.value or "").strip()
         resolved_mode = resolve_training_feature_mode()
         if resolved_mode is None:
             return None
         feature_mode_value, feature_mode_display = resolved_mode
+        model_family_value, model_family_display = resolve_training_model_family()
+        sequence_use_standardized_reflectance, sequence_input_display = resolve_training_sequence_standardization()
 
         try:
             epochs_value = int(epochs_raw)
@@ -4684,7 +4754,16 @@ def main(page: ft.Page) -> None:
             show_error("train", "Validation split must be between 1 and 99.")
             return None
 
-        return epochs_value, split_percent / 100.0, feature_mode_value, feature_mode_display
+        return (
+            epochs_value,
+            split_percent / 100.0,
+            feature_mode_value,
+            feature_mode_display,
+            model_family_value,
+            model_family_display,
+            sequence_use_standardized_reflectance,
+            sequence_input_display,
+        )
 
     async def run_apply(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4759,7 +4838,9 @@ def main(page: ft.Page) -> None:
         archive_warnings: list[str] = []
         single_scene_replacement_input = {"value": None}
         total_scenes = len(scene_inputs)
+        detected_model_family_label = {"value": ""}
         detected_feature_mode_label = {"value": ""}
+        detected_sequence_input_label = {"value": ""}
 
         def _is_current_apply_run(run_token: int = apply_run_token) -> bool:
             return (
@@ -4888,7 +4969,11 @@ def main(page: ft.Page) -> None:
                     message = (raw_message or "").strip()
                     if not is_batch_run:
                         return message
+                    if message.startswith("Detected model method: "):
+                        return message
                     if message.startswith("Detected model feature mode: "):
+                        return message
+                    if message.startswith("Detected spectral inputs: "):
                         return message
                     if message.startswith("Extracting zipped Sentinel-2 scene from "):
                         return "Extracting zipped Sentinel-2 scene"
@@ -4915,8 +5000,12 @@ def main(page: ft.Page) -> None:
                     current_scene_output: str = scene_output,
                 ) -> None:
                     is_batch_run = scene_total > 1 or batch_mode
+                    if message.startswith("Detected model method: "):
+                        detected_model_family_label["value"] = message.split(": ", 1)[1].strip()
                     if message.startswith("Detected model feature mode: "):
                         detected_feature_mode_label["value"] = message.split(": ", 1)[1].strip()
+                    if message.startswith("Detected spectral inputs: "):
+                        detected_sequence_input_label["value"] = message.split(": ", 1)[1].strip()
                     prefix = (
                         f"[{scene_index}/{scene_total}] "
                         if is_batch_run
@@ -5010,9 +5099,19 @@ def main(page: ft.Page) -> None:
             failed_count = len(failed_scene_records)
             done_moved_count = len(archived_done_inputs)
             failed_moved_count = len(archived_failed_inputs)
+            method_suffix = (
+                f" Detected method: {detected_model_family_label['value']}."
+                if detected_model_family_label["value"]
+                else ""
+            )
             mode_suffix = (
                 f" Detected mode: {detected_feature_mode_label['value']}."
                 if detected_feature_mode_label["value"]
+                else ""
+            )
+            spectral_input_suffix = (
+                f" Spectral inputs: {detected_sequence_input_label['value']}."
+                if detected_sequence_input_label["value"]
                 else ""
             )
             apply_progress.value = 1.0
@@ -5026,24 +5125,27 @@ def main(page: ft.Page) -> None:
                     )
                     push_apply_status(
                         f"Workflow finished successfully. Output written to {completed_outputs[0]}."
-                        f"{done_suffix}{mode_suffix}"
+                        f"{done_suffix}{method_suffix}{mode_suffix}{spectral_input_suffix}"
                     )
                 elif processed_count > 0 and skipped_existing_count == 0:
                     push_apply_status(
                         f"Batch workflow finished successfully. {processed_count} output(s) were written to "
-                        f"{output_folder}. {done_moved_count} input(s) moved to Done.{mode_suffix}"
+                        f"{output_folder}. {done_moved_count} input(s) moved to Done."
+                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}"
                     )
                 elif processed_count > 0:
                     push_apply_status(
                         f"Apply workflow completed. {processed_count} output(s) written, "
                         f"{skipped_existing_count} already processed scene(s) detected, and "
-                        f"{done_moved_count} input(s) moved to Done.{mode_suffix}"
+                        f"{done_moved_count} input(s) moved to Done."
+                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}"
                     )
                 elif skipped_existing_count > 0:
                     push_apply_status(
                         "No new outputs were written. "
                         f"{skipped_existing_count} scene(s) were already processed and "
-                        f"{done_moved_count} input(s) were moved to Done.{mode_suffix}",
+                        f"{done_moved_count} input(s) were moved to Done."
+                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}",
                     )
                 else:
                     push_apply_status("No scenes were queued for processing.", level="warning")
@@ -5067,7 +5169,8 @@ def main(page: ft.Page) -> None:
                 summary_message = (
                     f"Apply workflow completed with errors. {processed_count} output(s) written, "
                     f"{failed_count} scene(s) failed, {done_moved_count} input(s) moved to Done, and "
-                    f"{failed_moved_count} input(s) moved to Failed.{mode_suffix}"
+                    f"{failed_moved_count} input(s) moved to Failed."
+                    f"{method_suffix}{mode_suffix}{spectral_input_suffix}"
                 )
                 push_apply_status(summary_message, level="error")
                 update_overlay(
@@ -5119,7 +5222,9 @@ def main(page: ft.Page) -> None:
                 mask_path=mask_path_value,
                 error_message=run_error_message,
                 details=(
+                    f"model_family={detected_model_family_label['value'] or '-'}; "
                     f"feature_mode={detected_feature_mode_label['value'] or '-'}; "
+                    f"spectral_inputs={detected_sequence_input_label['value'] or '-'}; "
                     f"Scenes={selected_scene_count}; queued={total_scenes}; processed={processed_count}; "
                     f"skipped_existing={skipped_existing_count}; failed={failed_count}; "
                     f"moved_done={done_moved_count}; moved_failed={failed_moved_count}; "
@@ -5158,19 +5263,54 @@ def main(page: ft.Page) -> None:
         parsed_training_inputs = parse_training_inputs()
         if parsed_training_inputs is None:
             return
-        epochs_to_run, valid_pct_to_use, feature_mode_value, feature_mode_display = parsed_training_inputs
+        (
+            epochs_to_run,
+            valid_pct_to_use,
+            feature_mode_value,
+            feature_mode_display,
+            model_family_value,
+            model_family_display,
+            sequence_use_standardized_reflectance,
+            sequence_input_display,
+        ) = parsed_training_inputs
 
         train_progress.value = 0
         train_spinner.visible = True
         state["operation_mode"] = "train"
-        push_train_status(f"Queued model training run ({feature_mode_display}).")
-        set_global_busy(True, f"Training a new {feature_mode_display} ICE CREAMS model.")
+        push_train_status(
+            (
+                f"Queued model training run ({model_family_display}, {feature_mode_display})"
+                + (
+                    f" with {sequence_input_display}."
+                    if model_family_value == MODEL_FAMILY_SPECTRAL_1D_CNN
+                    else "."
+                )
+            )
+        )
+        set_global_busy(
+            True,
+            (
+                f"Training a new {model_family_display} ({feature_mode_display}) ICE CREAMS model."
+                if model_family_value != MODEL_FAMILY_SPECTRAL_1D_CNN
+                else (
+                    f"Training a new {model_family_display} ({feature_mode_display}) ICE CREAMS model "
+                    f"with {sequence_input_display}."
+                )
+            ),
+        )
         update_overlay(
             title="Training Model",
-            detail=f"Preparing the {feature_mode_display} training run.",
+            detail=(
+                f"Preparing the {model_family_display} ({feature_mode_display}) training run."
+                if model_family_value != MODEL_FAMILY_SPECTRAL_1D_CNN
+                else (
+                    f"Preparing the {model_family_display} ({feature_mode_display}) training run "
+                    f"with {sequence_input_display}."
+                )
+            ),
             progress=0,
             counter="Training session",
-            job=f"Model training ({feature_mode_display})",
+            job=f"Model training ({model_family_display})",
             source=_training_source_overlay_path(),
             destination=output_model,
         )
@@ -5197,19 +5337,35 @@ def main(page: ft.Page) -> None:
                 4096,
                 42,
                 feature_mode_value,
+                model_family_value,
+                sequence_use_standardized_reflectance,
                 schedule_train_status,
                 schedule_train_progress,
             )
             training_result = result
             accuracy = result.get("accuracy")
             trained_mode_label = str(result.get("feature_mode_label") or feature_mode_display)
+            trained_model_family_label = str(
+                result.get("model_family_label") or model_family_display
+            )
+            trained_sequence_input_label = str(
+                result.get("sequence_input_label") or sequence_input_display
+            )
             accuracy_text = (
                 f" Validation accuracy: {accuracy:.4f}."
                 if isinstance(accuracy, float)
                 else ""
             )
+            spectral_input_text = (
+                f"Spectral inputs: {trained_sequence_input_label}. "
+                if model_family_value == MODEL_FAMILY_SPECTRAL_1D_CNN
+                else ""
+            )
             push_train_status(
-                f"Training completed ({trained_mode_label}). {result['rows']} rows across {result['csv_files']} CSV files were used.{accuracy_text}"
+                f"Training completed ({trained_model_family_label}, {trained_mode_label}). "
+                f"{spectral_input_text}"
+                f"{result['rows']} rows across {result['csv_files']} CSV files were used."
+                f"{accuracy_text}"
             )
             report_idle("Training completed.")
         except Exception as exc:  # noqa: BLE001 - surface backend errors to the user.
@@ -5237,6 +5393,15 @@ def main(page: ft.Page) -> None:
             trained_mode_label = str(
                 (training_result or {}).get("feature_mode_label") or feature_mode_display
             )
+            trained_model_family_label = str(
+                (training_result or {}).get("model_family_label") or model_family_display
+            )
+            trained_sequence_input_label = str(
+                (training_result or {}).get("sequence_input_label") or sequence_input_display
+            )
+            trained_model_family_value = str(
+                (training_result or {}).get("model_family") or model_family_value
+            )
             primary_input_path = (
                 selected_training_csvs[0]
                 if selected_training_csvs
@@ -5252,7 +5417,9 @@ def main(page: ft.Page) -> None:
                 output_path=trained_model_path,
                 error_message=run_error_message,
                 details=(
-                    f"mode={trained_mode_label}; input_csvs={len(selected_training_csvs)}; rows={rows_used}; "
+                    f"model_family={trained_model_family_label}; mode={trained_mode_label}; "
+                    f"spectral_inputs={trained_sequence_input_label if trained_model_family_value == MODEL_FAMILY_SPECTRAL_1D_CNN else '-'}; "
+                    f"input_csvs={len(selected_training_csvs)}; rows={rows_used}; "
                     f"csv_files={csv_files_used}; accuracy={accuracy_display}"
                 ),
             )
@@ -5345,9 +5512,20 @@ def main(page: ft.Page) -> None:
                 target_class=target_class,
             )
             validation_result = result
+            detected_model_family_label = str(
+                result.get("model_family_label") or "Detected method unavailable"
+            )
             detected_feature_mode_label = str(result.get("feature_mode_label") or "Detected mode unavailable")
+            detected_sequence_input_label = str(result.get("sequence_input_label") or "")
+            spectral_input_text = (
+                f"Spectral inputs: {detected_sequence_input_label}. "
+                if str(result.get("model_family") or "") == MODEL_FAMILY_SPECTRAL_1D_CNN
+                and detected_sequence_input_label
+                else ""
+            )
             push_validation_status(
-                f"Validation completed ({detected_feature_mode_label}). "
+                f"Validation completed ({detected_model_family_label}, {detected_feature_mode_label}). "
+                f"{spectral_input_text}"
                 f"{result['rows']} row(s) evaluated across {result['classes']} class(es). "
                 f"Predictions: {result['predictions_csv']} | Metrics: {result['metrics_csv']}"
             )
@@ -5382,8 +5560,17 @@ def main(page: ft.Page) -> None:
                     metrics_output = str(validation_result["metrics_csv"])
                 rows_evaluated = int(_history_float(validation_result.get("rows", 0)))
                 class_count = int(_history_float(validation_result.get("classes", 0)))
+            detected_model_family_label = str(
+                (validation_result or {}).get("model_family_label") or "-"
+            )
             detected_feature_mode_label = str(
                 (validation_result or {}).get("feature_mode_label") or "-"
+            )
+            detected_sequence_input_label = str(
+                (validation_result or {}).get("sequence_input_label") or "-"
+            )
+            detected_model_family_value = str(
+                (validation_result or {}).get("model_family") or "-"
             )
             record_run_history(
                 workflow="validation",
@@ -5395,7 +5582,9 @@ def main(page: ft.Page) -> None:
                 output_path=predictions_output,
                 error_message=run_error_message,
                 details=(
-                    f"mode={mode_display}; feature_mode={detected_feature_mode_label}; "
+                    f"mode={mode_display}; model_family={detected_model_family_label}; "
+                    f"feature_mode={detected_feature_mode_label}; "
+                    f"spectral_inputs={detected_sequence_input_label if detected_model_family_value == MODEL_FAMILY_SPECTRAL_1D_CNN else '-'}; "
                     f"rows={rows_evaluated}; classes={class_count}; "
                     f"metrics={metrics_output or '-'}"
                 ),
@@ -5517,6 +5706,8 @@ def main(page: ft.Page) -> None:
         training_epochs_field,
         training_split_field,
         training_mode_dropdown,
+        training_spectral_cnn_checkbox,
+        training_sequence_standardization_checkbox,
         validation_dataset_button,
         validation_dropdown_model_button,
         validation_external_model_button,
@@ -5534,6 +5725,9 @@ def main(page: ft.Page) -> None:
     validation_mode_dropdown.on_select = on_validation_mode_select
     validation_target_class_field.on_submit = on_validation_target_class_change
     training_mode_dropdown.on_select = on_training_mode_select
+    training_spectral_cnn_checkbox.on_change = on_training_model_family_toggle
+    training_sequence_standardization_checkbox.on_change = on_training_sequence_standardization_toggle
+    sync_training_model_controls(refresh=False)
     sync_validation_mode_controls(refresh=False)
 
     apply_intro_panel = _workflow_intro_panel(
@@ -5551,8 +5745,8 @@ def main(page: ft.Page) -> None:
         "Build a new model from CSV datasets with a consistent workflow from data selection to export.",
         [
             "Select CSV files and/or folders",
-            "Choose output model location",
-            "Set mode, epochs, and validation split",
+            "Set output model name",
+            "Set method, mode, epochs, and validation split",
             "Train and review final accuracy",
         ],
     )
@@ -5976,7 +6170,7 @@ def main(page: ft.Page) -> None:
                                     run_spacing=16,
                                     controls=[
                                         ft.Container(
-                                            col={"xs": 12, "md": 4},
+                                            col={"xs": 12, "md": 3},
                                             content=ft.Column(
                                                 spacing=8,
                                                 controls=[
@@ -5996,7 +6190,28 @@ def main(page: ft.Page) -> None:
                                             ),
                                         ),
                                         ft.Container(
-                                            col={"xs": 12, "md": 4},
+                                            col={"xs": 12, "md": 3},
+                                            content=ft.Column(
+                                                spacing=8,
+                                                controls=[
+                                                    ft.Text(
+                                                        "Model Method",
+                                                        size=13,
+                                                        weight=ft.FontWeight.W_500,
+                                                        color=LIQUID_SUBTEXT,
+                                                    ),
+                                                    training_spectral_cnn_checkbox,
+                                                    training_sequence_standardization_checkbox,
+                                                    ft.Text(
+                                                        "Checked: use the spectral 1D CNN. Unchecked: use the legacy tabular dense network. The standardized-reflectance option is stored with CNN models and auto-detected during apply and validation.",
+                                                        size=11,
+                                                        color=LIQUID_MUTED,
+                                                    ),
+                                                ],
+                                            ),
+                                        ),
+                                        ft.Container(
+                                            col={"xs": 12, "md": 3},
                                             content=ft.Column(
                                                 spacing=8,
                                                 controls=[
@@ -6016,7 +6231,7 @@ def main(page: ft.Page) -> None:
                                             ),
                                         ),
                                         ft.Container(
-                                            col={"xs": 12, "md": 4},
+                                            col={"xs": 12, "md": 3},
                                             content=ft.Column(
                                                 spacing=8,
                                                 controls=[

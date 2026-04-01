@@ -119,6 +119,14 @@ def _normalise_feature_name_list(feature_names: Iterable[Any]) -> list[str]:
 
 def extract_learner_required_feature_names(learner: Any) -> list[str]:
     """Extract tabular input feature names from an exported fastai learner."""
+    metadata = getattr(learner, "ice_creams_model_metadata", None)
+    if isinstance(metadata, dict):
+        metadata_features = _normalise_feature_name_list(
+            metadata.get("required_feature_names") or metadata.get("sequence_feature_names")
+        )
+        if metadata_features:
+            return metadata_features
+
     discovered: list[str] = []
     seen: set[str] = set()
 
@@ -186,6 +194,15 @@ def infer_feature_mode_from_feature_names(feature_names: Iterable[Any]) -> str:
 
 def infer_feature_mode_from_learner(learner: Any) -> tuple[str, list[str]]:
     """Infer feature mode and ordered feature names from an exported fastai learner."""
+    metadata = getattr(learner, "ice_creams_model_metadata", None)
+    if isinstance(metadata, dict):
+        metadata_features = _normalise_feature_name_list(
+            metadata.get("required_feature_names") or metadata.get("sequence_feature_names")
+        )
+        explicit_mode = metadata.get("feature_mode")
+        if explicit_mode is not None and metadata_features:
+            return normalize_feature_mode(explicit_mode), metadata_features
+
     required_feature_names = extract_learner_required_feature_names(learner)
     inferred_mode = infer_feature_mode_from_feature_names(required_feature_names)
     return inferred_mode, required_feature_names

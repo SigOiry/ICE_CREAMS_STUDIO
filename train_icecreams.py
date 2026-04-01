@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train an ICE CREAMS fastai tabular model from CSV training data."""
+"""Train an ICE CREAMS tabular or spectral 1D CNN model from CSV training data."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 from fastai.callback.core import Callback
+from fastai.learner import Learner
 from fastai.tabular.all import (
     CategoryBlock,
     FillMissing,
@@ -27,6 +29,21 @@ from ice_creams_feature_modes import (
     build_training_dataframe,
     feature_mode_label,
     normalize_feature_mode,
+)
+from ice_creams_model_families import (
+    apply_sequence_normalization,
+    DEFAULT_MODEL_FAMILY,
+    DEFAULT_SPECTRAL_CNN_USE_STANDARDIZED_REFLECTANCE,
+    MODEL_FAMILY_CHOICES,
+    MODEL_FAMILY_SPECTRAL_1D_CNN,
+    attach_model_metadata,
+    build_spectral_cnn_learner,
+    model_family_label,
+    normalize_model_family,
+    prepare_sequence_feature_dataframe,
+    compute_sequence_normalization,
+    spectral_cnn_sequence_input_label,
+    sequence_channel_feature_names_for_mode,
 )
 
 
@@ -143,6 +160,8 @@ def train_model(
     batch_size: int = 4096,
     seed: int = 42,
     feature_mode: str = DEFAULT_FEATURE_MODE,
+    model_family: str = DEFAULT_MODEL_FAMILY,
+    spectral_cnn_use_standardized_reflectance: bool = DEFAULT_SPECTRAL_CNN_USE_STANDARDIZED_REFLECTANCE,
     status_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
@@ -162,10 +181,18 @@ def train_model(
 
     resolved_feature_mode = normalize_feature_mode(feature_mode)
     selected_mode_label = feature_mode_label(resolved_feature_mode)
+    resolved_model_family = normalize_model_family(model_family)
+    selected_model_family_label = model_family_label(resolved_model_family)
+    selected_sequence_input_label = spectral_cnn_sequence_input_label(
+        spectral_cnn_use_standardized_reflectance
+    )
 
     csv_files = discover_training_csvs(training_source)
     _emit_status(status_callback, f"Found {len(csv_files)} training CSV files")
     _emit_status(status_callback, f"Training feature mode: {selected_mode_label}")
+    _emit_status(status_callback, f"Training model method: {selected_model_family_label}")
+    if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN:
+        _emit_status(status_callback, f"Training spectral inputs: {selected_sequence_input_label}")
     _emit_progress(progress_callback, 0.04)
 
     frames: list[pd.DataFrame] = []
@@ -182,46 +209,139 @@ def train_model(
     _emit_progress(progress_callback, 0.38)
 
     dep_var = "True_Class"
-    _emit_status(status_callback, f"Preparing {selected_mode_label} training features")
-    df_nn, feature_columns, resolved_feature_mode = build_training_dataframe(
-        df_nn,
-        feature_mode=resolved_feature_mode,
-        label_column=dep_var,
-    )
-    selected_mode_label = feature_mode_label(resolved_feature_mode)
+    learn: Learner
+    n_classes: int
+    feature_columns: list[str]
+    label_series = df_nn[dep_var].astype("string").fillna("").str.strip()
+    if label_series.eq("").any():
+        raise ValueError("Training data contains missing values in the True_Class column.")
 
-    _emit_status(status_callback, "Preparing fastai tabular data loaders")
-    splits = RandomSplitter(valid_pct=valid_pct, seed=seed)(range_of(df_nn))
-    to_nn = TabularPandas(
-        df_nn,
-        [FillMissing],
-        [],
-        feature_columns,
-        splits=splits,
-        y_names=dep_var,
-        y_block=CategoryBlock(),
-    )
-    dls = to_nn.dataloaders(bs=batch_size)
-    _emit_progress(progress_callback, 0.5)
+    if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN:
+        _emit_status(status_callback, f"Preparing {selected_mode_label} spectral sequences")
+        sequence_channel_feature_names = sequence_channel_feature_names_for_mode(
+            resolved_feature_mode,
+            use_standardized_reflectance=spectral_cnn_use_standardized_reflectance,
+        )
+        sequence_frame = prepare_sequence_feature_dataframe(
+            df_nn,
+            feature_mode=resolved_feature_mode,
+            sequence_channel_feature_names=sequence_channel_feature_names,
+            context="Training data",
+        )
+        feature_columns = list(sequence_frame.columns)
+        splits = RandomSplitter(valid_pct=valid_pct, seed=seed)(range_of(sequence_frame))
+        train_indices, valid_indices = splits
+        if not train_indices or not valid_indices:
+            raise ValueError("Training/validation split produced an empty partition. Adjust the split or input data.")
 
-    n_classes = int(df_nn[dep_var].dropna().nunique())
-    _emit_status(status_callback, "Building tabular neural network")
-    learn = tabular_learner(dls, n_out=n_classes, metrics=accuracy)
-    _emit_progress(progress_callback, 0.56)
+        vocab = sorted(label_series.unique().tolist())
+        if len(vocab) < 2:
+            raise ValueError("At least two distinct classes are required to train a spectral 1D CNN model.")
 
-    progress_cb = TrainingProgressCallback(
-        total_epochs=epochs + 1,
-        base_progress=0.56,
-        progress_span=0.34,
-        status_callback=status_callback,
-        progress_callback=progress_callback,
-    )
+        label_codes = pd.Categorical(label_series, categories=vocab).codes.astype(np.int64, copy=False)
+        if (label_codes < 0).any():
+            raise ValueError("Training data contains labels that could not be encoded for the spectral 1D CNN.")
 
-    learn.add_cb(progress_cb)
-    try:
-        learn.fine_tune(epochs)
-    finally:
-        learn.remove_cb(progress_cb)
+        sequence_values = np.stack(
+            [
+                sequence_frame.loc[:, channel_feature_names].to_numpy(dtype=np.float32, copy=True)
+                for channel_feature_names in sequence_channel_feature_names
+            ],
+            axis=1,
+        )
+        sequence_normalization = compute_sequence_normalization(sequence_values[train_indices])
+        normalized_values = apply_sequence_normalization(
+            sequence_values,
+            sequence_normalization,
+        )
+
+        _emit_status(status_callback, "Preparing fastai spectral 1D CNN data loaders")
+        learn = build_spectral_cnn_learner(
+            normalized_values[train_indices],
+            label_codes[train_indices],
+            normalized_values[valid_indices],
+            label_codes[valid_indices],
+            vocab=vocab,
+            sequence_feature_names=feature_columns,
+            batch_size=batch_size,
+        )
+        n_classes = len(vocab)
+        selected_sequence_input_label = spectral_cnn_sequence_input_label(
+            len(sequence_channel_feature_names) > 1
+        )
+        _emit_progress(progress_callback, 0.5)
+
+        _emit_status(status_callback, "Building spectral 1D CNN")
+        attach_model_metadata(
+            learn,
+            model_family=resolved_model_family,
+            feature_mode=resolved_feature_mode,
+            required_feature_names=feature_columns,
+            sequence_feature_names=feature_columns,
+            sequence_channel_feature_names=sequence_channel_feature_names,
+            sequence_normalization=sequence_normalization,
+        )
+        _emit_progress(progress_callback, 0.56)
+
+        progress_cb = TrainingProgressCallback(
+            total_epochs=epochs,
+            base_progress=0.56,
+            progress_span=0.34,
+            status_callback=status_callback,
+            progress_callback=progress_callback,
+        )
+        learn.add_cb(progress_cb)
+        try:
+            learn.fit_one_cycle(epochs, 1e-3)
+        finally:
+            learn.remove_cb(progress_cb)
+    else:
+        _emit_status(status_callback, f"Preparing {selected_mode_label} training features")
+        df_nn, feature_columns, resolved_feature_mode = build_training_dataframe(
+            df_nn,
+            feature_mode=resolved_feature_mode,
+            label_column=dep_var,
+        )
+        selected_mode_label = feature_mode_label(resolved_feature_mode)
+
+        _emit_status(status_callback, "Preparing fastai tabular data loaders")
+        splits = RandomSplitter(valid_pct=valid_pct, seed=seed)(range_of(df_nn))
+        to_nn = TabularPandas(
+            df_nn,
+            [FillMissing],
+            [],
+            feature_columns,
+            splits=splits,
+            y_names=dep_var,
+            y_block=CategoryBlock(),
+        )
+        dls = to_nn.dataloaders(bs=batch_size)
+        _emit_progress(progress_callback, 0.5)
+
+        n_classes = int(df_nn[dep_var].dropna().nunique())
+        _emit_status(status_callback, "Building tabular neural network")
+        learn = tabular_learner(dls, n_out=n_classes, metrics=accuracy)
+        attach_model_metadata(
+            learn,
+            model_family=resolved_model_family,
+            feature_mode=resolved_feature_mode,
+            required_feature_names=feature_columns,
+        )
+        _emit_progress(progress_callback, 0.56)
+
+        progress_cb = TrainingProgressCallback(
+            total_epochs=epochs + 1,
+            base_progress=0.56,
+            progress_span=0.34,
+            status_callback=status_callback,
+            progress_callback=progress_callback,
+        )
+
+        learn.add_cb(progress_cb)
+        try:
+            learn.fine_tune(epochs)
+        finally:
+            learn.remove_cb(progress_cb)
 
     _emit_status(status_callback, "Running final validation")
     validation = learn.validate()
@@ -242,8 +362,20 @@ def train_model(
         "csv_files": int(len(csv_files)),
         "classes": n_classes,
         "accuracy": accuracy_value,
+        "model_family": resolved_model_family,
+        "model_family_label": selected_model_family_label,
         "feature_mode": resolved_feature_mode,
         "feature_mode_label": selected_mode_label,
+        "sequence_use_standardized_reflectance": (
+            bool(len(sequence_channel_feature_names) > 1)
+            if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN
+            else False
+        ),
+        "sequence_input_label": (
+            selected_sequence_input_label
+            if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN
+            else ""
+        ),
     }
 
 
@@ -291,6 +423,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_FEATURE_MODE,
         help="Training feature mode",
     )
+    parser.add_argument(
+        "--model-family",
+        choices=MODEL_FAMILY_CHOICES,
+        default=DEFAULT_MODEL_FAMILY,
+        help="Training model family",
+    )
     return parser
 
 
@@ -304,6 +442,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         seed=args.seed,
         feature_mode=args.feature_mode,
+        model_family=args.model_family,
         status_callback=print,
     )
     print(f"Validation accuracy: {result['accuracy']}")
