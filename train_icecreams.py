@@ -17,9 +17,16 @@ from fastai.tabular.all import (
     RandomSplitter,
     TabularPandas,
     accuracy,
-    cont_cat_split,
     range_of,
     tabular_learner,
+)
+
+from ice_creams_feature_modes import (
+    DEFAULT_FEATURE_MODE,
+    FEATURE_MODE_CHOICES,
+    build_training_dataframe,
+    feature_mode_label,
+    normalize_feature_mode,
 )
 
 
@@ -135,6 +142,7 @@ def train_model(
     valid_pct: float = 0.3,
     batch_size: int = 4096,
     seed: int = 42,
+    feature_mode: str = DEFAULT_FEATURE_MODE,
     status_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
@@ -152,8 +160,12 @@ def train_model(
     if batch_size < 1:
         raise ValueError("Batch size must be at least 1.")
 
+    resolved_feature_mode = normalize_feature_mode(feature_mode)
+    selected_mode_label = feature_mode_label(resolved_feature_mode)
+
     csv_files = discover_training_csvs(training_source)
     _emit_status(status_callback, f"Found {len(csv_files)} training CSV files")
+    _emit_status(status_callback, f"Training feature mode: {selected_mode_label}")
     _emit_progress(progress_callback, 0.04)
 
     frames: list[pd.DataFrame] = []
@@ -170,19 +182,21 @@ def train_model(
     _emit_progress(progress_callback, 0.38)
 
     dep_var = "True_Class"
-    if dep_var not in df_nn.columns:
-        raise ValueError(
-            "Training data must include a 'True_Class' column as the label."
-        )
+    _emit_status(status_callback, f"Preparing {selected_mode_label} training features")
+    df_nn, feature_columns, resolved_feature_mode = build_training_dataframe(
+        df_nn,
+        feature_mode=resolved_feature_mode,
+        label_column=dep_var,
+    )
+    selected_mode_label = feature_mode_label(resolved_feature_mode)
 
     _emit_status(status_callback, "Preparing fastai tabular data loaders")
     splits = RandomSplitter(valid_pct=valid_pct, seed=seed)(range_of(df_nn))
-    cont_nn, cat_nn = cont_cat_split(df_nn, dep_var=dep_var)
     to_nn = TabularPandas(
         df_nn,
         [FillMissing],
-        cat_nn,
-        cont_nn,
+        [],
+        feature_columns,
         splits=splits,
         y_names=dep_var,
         y_block=CategoryBlock(),
@@ -228,6 +242,8 @@ def train_model(
         "csv_files": int(len(csv_files)),
         "classes": n_classes,
         "accuracy": accuracy_value,
+        "feature_mode": resolved_feature_mode,
+        "feature_mode_label": selected_mode_label,
     }
 
 
@@ -269,6 +285,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=42,
         help="Random seed for train/validation splitting",
     )
+    parser.add_argument(
+        "--feature-mode",
+        choices=FEATURE_MODE_CHOICES,
+        default=DEFAULT_FEATURE_MODE,
+        help="Training feature mode",
+    )
     return parser
 
 
@@ -281,6 +303,7 @@ if __name__ == "__main__":
         valid_pct=args.valid_pct,
         batch_size=args.batch_size,
         seed=args.seed,
+        feature_mode=args.feature_mode,
         status_callback=print,
     )
     print(f"Validation accuracy: {result['accuracy']}")

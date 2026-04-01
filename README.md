@@ -23,7 +23,7 @@ The desktop application is distributed from the hosted UI repository:
 To install the app:
 
 - download the Windows installer directly here:
-  [`ICE_CREAMS_Installer_1_0_21.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_21.exe)
+  [`ICE_CREAMS_Installer_1_0_22.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_22.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu
   after installation
@@ -32,18 +32,37 @@ For end users, the packaged desktop app is the recommended entry point.
 A separate Conda or notebook setup is not required just to run the
 application.
 
+Patch notes for the current desktop release are available in
+[`PATCHNOTES.md`](PATCHNOTES.md).
+
+## What's New in 1.0.22
+
+- Added two training feature modes: **High Spatial Accuracy** and
+  **High Spectral Complexity**
+- Apply and Validation now auto-detect the selected model's feature mode
+  and rebuild the matching preprocessing automatically
+- Apply now supports 12-band multi-band `.tif` / `.tiff` inputs without
+  spatial resampling
+- Newly trained models are now saved automatically to the default
+  `models` folder and appear immediately in the Apply and Validation
+  model lists
+- Packaged desktop build and installer have been refreshed for version
+  `1.0.22`
+
 ## Current App Features
 
 Edit this list as new versions add, remove, or change features.
 
-- Version 1.0.1 adds optimized resampling performance during processing
-- Version 1.0.1 adds NDVI as an exported output
 - Windows desktop UI for running the ICE CREAMS workflow without opening
   the notebooks
 - Packaged model assets and validation tables shipped with the
   application
 - Guided selection of input scenes, masks, outputs, and available model
   files
+- Dual training feature modes for spatial and spectral model building
+- Automatic feature-mode detection in Apply and Validation
+- Support for Sentinel-2 `.SAFE`, `.zip`, and 12-band `.tif` / `.tiff`
+  apply inputs
 - Batch processing support for multiple Sentinel-2 scenes
 - Per-scene failure handling so one problematic input does not stop the
   rest of the batch

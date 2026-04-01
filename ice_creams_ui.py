@@ -40,6 +40,13 @@ from validate_icecreams import (
     VALIDATION_MODE_PRESENCE_ABSENCE,
     validate_model,
 )
+from ice_creams_feature_modes import (
+    DEFAULT_FEATURE_MODE,
+    FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
+    feature_mode_label,
+    normalize_feature_mode,
+)
 
 # Keep terminal output clean on current Flet versions.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -51,7 +58,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.21"
+APP_VERSION = "1.0.22"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -939,7 +946,7 @@ def main(page: ft.Page) -> None:
 
     apply_safe_field = ft.TextField(
         value="",
-        hint_text="Select a single .zip file, a single .SAFE folder, or a batch folder",
+        hint_text="Select a single .zip/.tif file, a single .SAFE folder, or a batch folder",
         read_only=True,
         border_radius=18,
         filled=True,
@@ -1563,7 +1570,7 @@ def main(page: ft.Page) -> None:
     )
     training_output_dir_field = ft.TextField(
         value=str(default_models_dir),
-        hint_text="Select where the new model should be stored",
+        hint_text="New models are saved automatically to the default models folder",
         read_only=True,
         border_radius=18,
         filled=True,
@@ -1603,6 +1610,28 @@ def main(page: ft.Page) -> None:
     training_split_field = ft.TextField(
         value="30",
         hint_text="1 to 99 (%)",
+        border_radius=18,
+        filled=True,
+        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
+        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
+        focused_border_color=LIQUID_ACCENT,
+        color=LIQUID_TEXT,
+        text_size=14,
+        height=56,
+        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
+    )
+    training_mode_dropdown = ft.Dropdown(
+        value=DEFAULT_FEATURE_MODE,
+        options=[
+            ft.dropdown.Option(
+                key=FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
+                text=feature_mode_label(FEATURE_MODE_HIGH_SPATIAL_ACCURACY),
+            ),
+            ft.dropdown.Option(
+                key=FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
+                text=feature_mode_label(FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY),
+            ),
+        ],
         border_radius=18,
         filled=True,
         fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
@@ -1689,6 +1718,74 @@ def main(page: ft.Page) -> None:
         height=56,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
     )
+
+    def _select_default_model(model_paths: list[Path]) -> Path | None:
+        return next(
+            (
+                model_path
+                for model_path in model_paths
+                if _normalise_model_name(model_path.stem) == preferred_model_key
+            ),
+            model_paths[0] if model_paths else None,
+        )
+
+    def refresh_model_dropdowns(
+        preferred_model_path: str | None = None,
+        refresh: bool = True,
+    ) -> None:
+        nonlocal existing_models, default_apply_model
+
+        existing_models = (
+            sorted(default_models_dir.rglob("*.pkl"))
+            if default_models_dir.exists()
+            else []
+        )
+        default_apply_model = _select_default_model(existing_models)
+
+        option_payloads = [
+            {
+                "key": str(model_path),
+                "text": model_path.name,
+            }
+            for model_path in existing_models
+        ]
+        apply_model_dropdown.options = [
+            ft.dropdown.Option(key=item["key"], text=item["text"])
+            for item in option_payloads
+        ]
+        validation_model_dropdown.options = [
+            ft.dropdown.Option(key=item["key"], text=item["text"])
+            for item in option_payloads
+        ]
+
+        preferred_value = ""
+        if preferred_model_path:
+            preferred_candidate = Path(preferred_model_path)
+            if preferred_candidate.exists():
+                preferred_value = str(preferred_candidate.resolve())
+
+        available_values = {str(model_path) for model_path in existing_models}
+
+        def _resolve_dropdown_value(current_value: str | None, *, allow_preferred: bool) -> str | None:
+            if allow_preferred and preferred_value and preferred_value in available_values:
+                return preferred_value
+            normalized_current = (current_value or "").strip()
+            if normalized_current and normalized_current in available_values:
+                return normalized_current
+            return str(default_apply_model) if default_apply_model else None
+
+        apply_model_dropdown.value = _resolve_dropdown_value(apply_model_dropdown.value, allow_preferred=True)
+        if not (validation_external_model_field.value or "").strip():
+            validation_model_dropdown.value = _resolve_dropdown_value(
+                validation_model_dropdown.value,
+                allow_preferred=True,
+            )
+
+        if refresh:
+            refresh_apply_preview()
+            refresh_apply_run_button_state()
+            refresh_validation_preview()
+            request_ui_refresh(force=True)
     validation_label_column_field = ft.TextField(
         value="Label_Char",
         hint_text="Ground-truth label column name",
@@ -2008,6 +2105,10 @@ def main(page: ft.Page) -> None:
         scene_name = Path(scene_value).name
         if scene_name.lower().endswith(".zip"):
             scene_name = scene_name[:-4]
+        if scene_name.lower().endswith(".tiff"):
+            scene_name = scene_name[:-5]
+        elif scene_name.lower().endswith(".tif"):
+            scene_name = scene_name[:-4]
         if scene_name.upper().endswith(".SAFE"):
             scene_name = scene_name[:-5]
         return scene_name
@@ -2051,13 +2152,12 @@ def main(page: ft.Page) -> None:
         return str(default_apply_output_dir)
 
     def build_training_output_path() -> str:
-        target_dir = training_output_dir_field.value.strip()
         model_name = training_model_name_field.value.strip()
-        if not target_dir or not model_name:
+        if not model_name:
             return ""
         if not model_name.lower().endswith(".pkl"):
             model_name = f"{model_name}.pkl"
-        return str(Path(target_dir) / model_name)
+        return str(default_models_dir / model_name)
 
     def _derive_validation_dataset_stem(dataset_value: str | None = None) -> str:
         dataset_input = (dataset_value or validation_dataset_field.value).strip()
@@ -2380,12 +2480,12 @@ def main(page: ft.Page) -> None:
         if duplicate_count > 0:
             push_apply_status(
                 f"Warning: {duplicate_count} duplicate scene(s) detected. "
-                f"{scene_batch_info['skipped_count']} duplicate file(s) will be skipped (SAFE preferred over ZIP).",
+                f"{scene_batch_info['skipped_count']} duplicate file(s) will be skipped (SAFE preferred over TIFF preferred over ZIP).",
                 level="warning",
             )
         if ignored_count > 0:
             push_apply_status(
-                f"Warning: {ignored_count} non-Sentinel .SAFE/.zip item(s) were ignored.",
+                f"Warning: {ignored_count} unsupported .SAFE/.zip/.tif/.tiff item(s) were ignored.",
                 level="warning",
             )
 
@@ -2720,8 +2820,13 @@ def main(page: ft.Page) -> None:
         batch_popup_summary.value = (
             f"Detected {batch_info['raw_count']} input(s). {batch_info['unique_count']} unique scene(s) selected."
         )
+        format_parts = [
+            f"{int(format_counts.get('SAFE', 0))} SAFE",
+            f"{int(format_counts.get('TIFF', 0))} TIFF",
+            f"{int(format_counts.get('ZIP', 0))} ZIP",
+        ]
         batch_popup_formats.value = (
-            f"Formats used: {format_counts['SAFE']} SAFE, {format_counts['ZIP']} ZIP."
+            f"Formats used: {', '.join(format_parts)}."
         )
         batch_popup_dates.value = (
             f"Acquisition dates: {_format_compact_list(batch_info['acquisition_dates'], max_items=10)}"
@@ -2732,11 +2837,11 @@ def main(page: ft.Page) -> None:
         if duplicate_count > 0:
             warning_messages.append(
                 f"{duplicate_count} duplicate scene(s) detected. "
-                f"{batch_info['skipped_count']} duplicate file(s) skipped (SAFE preferred over ZIP)."
+                f"{batch_info['skipped_count']} duplicate file(s) skipped (SAFE preferred over TIFF preferred over ZIP)."
             )
         if ignored_count > 0:
             warning_messages.append(
-                f"{ignored_count} non-Sentinel .SAFE/.zip item(s) ignored."
+                f"{ignored_count} unsupported .SAFE/.zip/.tif/.tiff item(s) ignored."
             )
 
         if warning_messages:
@@ -4194,27 +4299,27 @@ def main(page: ft.Page) -> None:
         if state["busy"]:
             return
         files = await ft.FilePicker().pick_files(
-            dialog_title="Select a single Sentinel-2 .zip scene",
+            dialog_title="Select a single .zip scene or 12-band .tif/.tiff image",
             initial_directory=_resolve_initial_directory(apply_safe_field.value),
             file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["zip"],
+            allowed_extensions=["zip", "tif", "tiff"],
             allow_multiple=False,
         )
         if not files:
             return
 
         selected_path = Path(files[0].path)
-        if selected_path.suffix.lower() != ".zip":
-            show_error("apply", "Please select a .zip scene for this action.")
+        if selected_path.suffix.lower() not in {".zip", ".tif", ".tiff"}:
+            show_error("apply", "Please select a .zip, .tif, or .tiff input file for this action.")
             return
 
         try:
             await _discover_scene_batch_info_async(
                 str(selected_path),
-                "Validating the selected Sentinel-2 zip scene.",
+                "Validating the selected input file.",
             )
         except Exception as exc:  # noqa: BLE001 - surface discovery errors.
-            show_error("apply", f"Selected zip is not a valid Sentinel-2 scene: {exc}")
+            show_error("apply", f"Selected input file is not a valid apply input: {exc}")
             return
 
         apply_safe_field.value = str(selected_path)
@@ -4223,14 +4328,17 @@ def main(page: ft.Page) -> None:
         refresh_apply_preview()
         refresh_apply_run_button_state()
         hide_batch_popup()
-        push_apply_status("Single .zip scene selected.")
-        schedule_apply_preflight_scan("Checking already processed outputs for the selected zip scene.")
+        if selected_path.suffix.lower() == ".zip":
+            push_apply_status("Single .zip scene selected.")
+        else:
+            push_apply_status("Single TIFF input selected.")
+        schedule_apply_preflight_scan("Checking already processed outputs for the selected input file.")
 
     async def choose_scene_folder(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
         selected = await ft.FilePicker().get_directory_path(
-            dialog_title="Select a single .SAFE folder or a batch folder containing .SAFE/.zip scenes",
+            dialog_title="Select a single .SAFE folder or a batch folder containing .SAFE/.zip/.tif inputs",
             initial_directory=_resolve_initial_directory(apply_safe_field.value),
         )
         if selected:
@@ -4257,10 +4365,10 @@ def main(page: ft.Page) -> None:
             try:
                 batch_info = await _discover_scene_batch_info_async(
                     selected,
-                    "Scanning the selected batch folder for Sentinel-2 imagery.",
+                    "Scanning the selected batch folder for apply inputs.",
                 )
             except Exception as exc:
-                show_error("apply", f"Could not discover batch scenes: {exc}")
+                show_error("apply", f"Could not discover batch inputs: {exc}")
                 return
 
             apply_safe_field.value = selected
@@ -4272,7 +4380,7 @@ def main(page: ft.Page) -> None:
             ignored_count = int(batch_info.get("ignored_count", 0))
             if ignored_count > 0:
                 push_apply_status(
-                    f"Warning: {ignored_count} non-Sentinel .SAFE/.zip item(s) were ignored.",
+                    f"Warning: {ignored_count} unsupported .SAFE/.zip/.tif/.tiff item(s) were ignored.",
                     level="warning",
                 )
             show_batch_popup(batch_info)
@@ -4535,9 +4643,28 @@ def main(page: ft.Page) -> None:
             target_label = DEFAULT_TARGET_CLASS
         push_validation_status(f"Presence/absence target class set to '{target_label}'.")
 
-    def parse_training_inputs() -> tuple[int, float] | None:
+    def resolve_training_feature_mode() -> tuple[str, str] | None:
+        try:
+            resolved_mode = normalize_feature_mode(training_mode_dropdown.value or DEFAULT_FEATURE_MODE)
+        except ValueError as exc:
+            show_error("train", str(exc))
+            return None
+        return resolved_mode, feature_mode_label(resolved_mode)
+
+    def on_training_mode_select(_: ft.ControlEvent) -> None:
+        resolved = resolve_training_feature_mode()
+        if resolved is None:
+            return
+        _, selected_mode_label = resolved
+        push_train_status(f"Training feature mode set to {selected_mode_label}.")
+
+    def parse_training_inputs() -> tuple[int, float, str, str] | None:
         epochs_raw = (training_epochs_field.value or "").strip()
         split_raw = (training_split_field.value or "").strip()
+        resolved_mode = resolve_training_feature_mode()
+        if resolved_mode is None:
+            return None
+        feature_mode_value, feature_mode_display = resolved_mode
 
         try:
             epochs_value = int(epochs_raw)
@@ -4557,7 +4684,7 @@ def main(page: ft.Page) -> None:
             show_error("train", "Validation split must be between 1 and 99.")
             return None
 
-        return epochs_value, split_percent / 100.0
+        return epochs_value, split_percent / 100.0, feature_mode_value, feature_mode_display
 
     async def run_apply(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4565,7 +4692,7 @@ def main(page: ft.Page) -> None:
         if not apply_safe_field.value.strip():
             show_error(
                 "apply",
-                "Choose a single .zip, a single .SAFE folder, or a batch folder before running.",
+                "Choose a single .zip/.tif file, a single .SAFE folder, or a batch folder before running.",
             )
             return
         if not apply_mask_field.value.strip():
@@ -4610,7 +4737,7 @@ def main(page: ft.Page) -> None:
         state["apply_run_token"] = int(state.get("apply_run_token", 0)) + 1
         apply_run_token = int(state["apply_run_token"])
         push_apply_status("Queued classification run.")
-        set_global_busy(True, "Processing the selected Sentinel-2 scene.")
+        set_global_busy(True, "Processing the selected apply input.")
         update_overlay(
             title="Applying ICE CREAMS",
             detail="Preparing the selected input.",
@@ -4632,6 +4759,7 @@ def main(page: ft.Page) -> None:
         archive_warnings: list[str] = []
         single_scene_replacement_input = {"value": None}
         total_scenes = len(scene_inputs)
+        detected_feature_mode_label = {"value": ""}
 
         def _is_current_apply_run(run_token: int = apply_run_token) -> bool:
             return (
@@ -4760,14 +4888,20 @@ def main(page: ft.Page) -> None:
                     message = (raw_message or "").strip()
                     if not is_batch_run:
                         return message
+                    if message.startswith("Detected model feature mode: "):
+                        return message
                     if message.startswith("Extracting zipped Sentinel-2 scene from "):
                         return "Extracting zipped Sentinel-2 scene"
                     if message.startswith("Reading Sentinel-2 scene from "):
                         return "Reading Sentinel-2 scene"
+                    if message.startswith("Reading multi-band TIFF from "):
+                        return "Reading multi-band TIFF"
                     if message.startswith("Writing Cloud-Optimised GeoTIFF to "):
                         return "Writing Cloud-Optimised GeoTIFF"
                     if message.startswith("Completed. Output saved to "):
                         return "Completed. Output saved"
+                    if message.startswith("Completed (") and "). Output saved to " in message:
+                        return message.split(". Output saved to ", 1)[0] + ". Output saved"
                     for path_value in (current_scene_input, current_scene_output):
                         if path_value:
                             message = message.replace(path_value, "").strip()
@@ -4781,6 +4915,8 @@ def main(page: ft.Page) -> None:
                     current_scene_output: str = scene_output,
                 ) -> None:
                     is_batch_run = scene_total > 1 or batch_mode
+                    if message.startswith("Detected model feature mode: "):
+                        detected_feature_mode_label["value"] = message.split(": ", 1)[1].strip()
                     prefix = (
                         f"[{scene_index}/{scene_total}] "
                         if is_batch_run
@@ -4874,6 +5010,11 @@ def main(page: ft.Page) -> None:
             failed_count = len(failed_scene_records)
             done_moved_count = len(archived_done_inputs)
             failed_moved_count = len(archived_failed_inputs)
+            mode_suffix = (
+                f" Detected mode: {detected_feature_mode_label['value']}."
+                if detected_feature_mode_label["value"]
+                else ""
+            )
             apply_progress.value = 1.0
 
             if failed_count == 0:
@@ -4885,24 +5026,24 @@ def main(page: ft.Page) -> None:
                     )
                     push_apply_status(
                         f"Workflow finished successfully. Output written to {completed_outputs[0]}."
-                        f"{done_suffix}"
+                        f"{done_suffix}{mode_suffix}"
                     )
                 elif processed_count > 0 and skipped_existing_count == 0:
                     push_apply_status(
                         f"Batch workflow finished successfully. {processed_count} output(s) were written to "
-                        f"{output_folder}. {done_moved_count} input(s) moved to Done."
+                        f"{output_folder}. {done_moved_count} input(s) moved to Done.{mode_suffix}"
                     )
                 elif processed_count > 0:
                     push_apply_status(
                         f"Apply workflow completed. {processed_count} output(s) written, "
                         f"{skipped_existing_count} already processed scene(s) detected, and "
-                        f"{done_moved_count} input(s) moved to Done."
+                        f"{done_moved_count} input(s) moved to Done.{mode_suffix}"
                     )
                 elif skipped_existing_count > 0:
                     push_apply_status(
                         "No new outputs were written. "
                         f"{skipped_existing_count} scene(s) were already processed and "
-                        f"{done_moved_count} input(s) were moved to Done.",
+                        f"{done_moved_count} input(s) were moved to Done.{mode_suffix}",
                     )
                 else:
                     push_apply_status("No scenes were queued for processing.", level="warning")
@@ -4926,7 +5067,7 @@ def main(page: ft.Page) -> None:
                 summary_message = (
                     f"Apply workflow completed with errors. {processed_count} output(s) written, "
                     f"{failed_count} scene(s) failed, {done_moved_count} input(s) moved to Done, and "
-                    f"{failed_moved_count} input(s) moved to Failed."
+                    f"{failed_moved_count} input(s) moved to Failed.{mode_suffix}"
                 )
                 push_apply_status(summary_message, level="error")
                 update_overlay(
@@ -4978,6 +5119,7 @@ def main(page: ft.Page) -> None:
                 mask_path=mask_path_value,
                 error_message=run_error_message,
                 details=(
+                    f"feature_mode={detected_feature_mode_label['value'] or '-'}; "
                     f"Scenes={selected_scene_count}; queued={total_scenes}; processed={processed_count}; "
                     f"skipped_existing={skipped_existing_count}; failed={failed_count}; "
                     f"moved_done={done_moved_count}; moved_failed={failed_moved_count}; "
@@ -5005,9 +5147,6 @@ def main(page: ft.Page) -> None:
                 "Choose one or more training CSV files (directly or via selected folders) before training.",
             )
             return
-        if not training_output_dir_field.value.strip():
-            show_error("train", "Choose a model output directory before training.")
-            return
         if not training_model_name_field.value.strip():
             show_error("train", "Provide a filename for the exported model.")
             return
@@ -5019,19 +5158,19 @@ def main(page: ft.Page) -> None:
         parsed_training_inputs = parse_training_inputs()
         if parsed_training_inputs is None:
             return
-        epochs_to_run, valid_pct_to_use = parsed_training_inputs
+        epochs_to_run, valid_pct_to_use, feature_mode_value, feature_mode_display = parsed_training_inputs
 
         train_progress.value = 0
         train_spinner.visible = True
         state["operation_mode"] = "train"
-        push_train_status("Queued model training run.")
-        set_global_busy(True, "Training a new ICE CREAMS model.")
+        push_train_status(f"Queued model training run ({feature_mode_display}).")
+        set_global_busy(True, f"Training a new {feature_mode_display} ICE CREAMS model.")
         update_overlay(
             title="Training Model",
-            detail="Preparing the training run.",
+            detail=f"Preparing the {feature_mode_display} training run.",
             progress=0,
             counter="Training session",
-            job="Model training",
+            job=f"Model training ({feature_mode_display})",
             source=_training_source_overlay_path(),
             destination=output_model,
         )
@@ -5057,18 +5196,20 @@ def main(page: ft.Page) -> None:
                 float(valid_pct_to_use),
                 4096,
                 42,
+                feature_mode_value,
                 schedule_train_status,
                 schedule_train_progress,
             )
             training_result = result
             accuracy = result.get("accuracy")
+            trained_mode_label = str(result.get("feature_mode_label") or feature_mode_display)
             accuracy_text = (
                 f" Validation accuracy: {accuracy:.4f}."
                 if isinstance(accuracy, float)
                 else ""
             )
             push_train_status(
-                f"Training completed. {result['rows']} rows across {result['csv_files']} CSV files were used.{accuracy_text}"
+                f"Training completed ({trained_mode_label}). {result['rows']} rows across {result['csv_files']} CSV files were used.{accuracy_text}"
             )
             report_idle("Training completed.")
         except Exception as exc:  # noqa: BLE001 - surface backend errors to the user.
@@ -5093,6 +5234,9 @@ def main(page: ft.Page) -> None:
                 if isinstance(accuracy_value, (int, float))
                 else "-"
             )
+            trained_mode_label = str(
+                (training_result or {}).get("feature_mode_label") or feature_mode_display
+            )
             primary_input_path = (
                 selected_training_csvs[0]
                 if selected_training_csvs
@@ -5108,10 +5252,12 @@ def main(page: ft.Page) -> None:
                 output_path=trained_model_path,
                 error_message=run_error_message,
                 details=(
-                    f"input_csvs={len(selected_training_csvs)}; rows={rows_used}; "
+                    f"mode={trained_mode_label}; input_csvs={len(selected_training_csvs)}; rows={rows_used}; "
                     f"csv_files={csv_files_used}; accuracy={accuracy_display}"
                 ),
             )
+            if not run_failed:
+                refresh_model_dropdowns(preferred_model_path=trained_model_path, refresh=False)
             if run_failed:
                 set_app_status("error", "Training failed.")
             request_ui_refresh(force=True)
@@ -5199,8 +5345,9 @@ def main(page: ft.Page) -> None:
                 target_class=target_class,
             )
             validation_result = result
+            detected_feature_mode_label = str(result.get("feature_mode_label") or "Detected mode unavailable")
             push_validation_status(
-                "Validation completed. "
+                f"Validation completed ({detected_feature_mode_label}). "
                 f"{result['rows']} row(s) evaluated across {result['classes']} class(es). "
                 f"Predictions: {result['predictions_csv']} | Metrics: {result['metrics_csv']}"
             )
@@ -5235,6 +5382,9 @@ def main(page: ft.Page) -> None:
                     metrics_output = str(validation_result["metrics_csv"])
                 rows_evaluated = int(_history_float(validation_result.get("rows", 0)))
                 class_count = int(_history_float(validation_result.get("classes", 0)))
+            detected_feature_mode_label = str(
+                (validation_result or {}).get("feature_mode_label") or "-"
+            )
             record_run_history(
                 workflow="validation",
                 status="failed" if run_failed else "success",
@@ -5245,7 +5395,8 @@ def main(page: ft.Page) -> None:
                 output_path=predictions_output,
                 error_message=run_error_message,
                 details=(
-                    f"mode={mode_display}; rows={rows_evaluated}; classes={class_count}; "
+                    f"mode={mode_display}; feature_mode={detected_feature_mode_label}; "
+                    f"rows={rows_evaluated}; classes={class_count}; "
                     f"metrics={metrics_output or '-'}"
                 ),
             )
@@ -5256,13 +5407,13 @@ def main(page: ft.Page) -> None:
                 show_validation_popup(validation_result)
 
     apply_single_scene_button = ft.ElevatedButton(
-        "Single ZIP",
+        "Single File",
         icon=ft.Icons.IMAGE_SEARCH,
         on_click=choose_single_scene,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
     )
     apply_scene_folder_button = ft.ElevatedButton(
-        "SAFE / Batch Folder",
+        "SAFE / Batch",
         icon=ft.Icons.FOLDER_OPEN,
         on_click=choose_scene_folder,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
@@ -5304,12 +5455,6 @@ def main(page: ft.Page) -> None:
         icon=ft.Icons.CLEAR_ALL,
         on_click=clear_training_dataset_selection,
         style=_frosted_button_style("#FFE8E8", "#6A2A2A"),
-    )
-    train_output_button = ft.ElevatedButton(
-        "Select Save Folder",
-        icon=ft.Icons.FOLDER_OPEN,
-        on_click=choose_training_output_dir,
-        style=_frosted_button_style("#E6F4FF", "#14324C"),
     )
     train_run_button = ft.ElevatedButton(
         "Train Model",
@@ -5367,11 +5512,11 @@ def main(page: ft.Page) -> None:
         train_source_button,
         train_source_folder_button,
         train_source_clear_button,
-        train_output_button,
         train_run_button,
         training_model_name_field,
         training_epochs_field,
         training_split_field,
+        training_mode_dropdown,
         validation_dataset_button,
         validation_dropdown_model_button,
         validation_external_model_button,
@@ -5388,13 +5533,14 @@ def main(page: ft.Page) -> None:
     validation_label_column_field.on_submit = on_validation_label_column_change
     validation_mode_dropdown.on_select = on_validation_mode_select
     validation_target_class_field.on_submit = on_validation_target_class_change
+    training_mode_dropdown.on_select = on_training_mode_select
     sync_validation_mode_controls(refresh=False)
 
     apply_intro_panel = _workflow_intro_panel(
         "Apply ICE CREAMS",
         "Run classification with a clear, guided sequence to reduce cognitive load and avoid setup mistakes.",
         [
-            "Select one scene or a batch folder",
+            "Select one SAFE/ZIP/TIFF input or a batch folder",
             "Choose the mask polygon",
             "Set output folder and model",
             "Run and monitor progress",
@@ -5406,7 +5552,7 @@ def main(page: ft.Page) -> None:
         [
             "Select CSV files and/or folders",
             "Choose output model location",
-            "Set epochs and validation split",
+            "Set mode, epochs, and validation split",
             "Train and review final accuracy",
         ],
     )
@@ -5469,7 +5615,7 @@ def main(page: ft.Page) -> None:
                                         ],
                                     ),
                                     ft.Text(
-                                        "Single .zip: use Single ZIP. Single .SAFE or batch: use SAFE / Batch Folder.",
+                                        "Single .zip/.tif: use Single File. Single .SAFE or batch folder with .SAFE/.zip/.tif: use SAFE / Batch.",
                                         size=11,
                                         color=LIQUID_MUTED,
                                     ),
@@ -5784,25 +5930,11 @@ def main(page: ft.Page) -> None:
                                             weight=ft.FontWeight.W_600,
                                             color=LIQUID_TEXT,
                                         ),
-                                        ft.ResponsiveRow(
-                                            columns=12,
-                                            run_spacing=8,
-                                            spacing=8,
-                                            controls=[
-                                                ft.Container(
-                                                    col={"xs": 12, "md": 8},
-                                                    content=training_output_dir_field,
-                                                ),
-                                                ft.Container(
-                                                    col={"xs": 12, "md": 4},
-                                                    content=train_output_button,
-                                                ),
-                                            ],
-                                        ),
+                                        training_output_dir_field,
                                         training_model_name_field,
                                         ft.Container(expand=True),
                                         ft.Text(
-                                            "Choose the destination folder and model filename (.pkl).",
+                                            "New models are always saved to the default models folder with the filename shown above.",
                                             size=11,
                                             color=LIQUID_MUTED,
                                         ),
@@ -5844,7 +5976,27 @@ def main(page: ft.Page) -> None:
                                     run_spacing=16,
                                     controls=[
                                         ft.Container(
-                                            col={"xs": 12, "md": 6},
+                                            col={"xs": 12, "md": 4},
+                                            content=ft.Column(
+                                                spacing=8,
+                                                controls=[
+                                                    ft.Text(
+                                                        "Feature Mode",
+                                                        size=13,
+                                                        weight=ft.FontWeight.W_500,
+                                                        color=LIQUID_SUBTEXT,
+                                                    ),
+                                                    training_mode_dropdown,
+                                                    ft.Text(
+                                                        "High Spectral Complexity stays the default training workflow.",
+                                                        size=11,
+                                                        color=LIQUID_MUTED,
+                                                    ),
+                                                ],
+                                            ),
+                                        ),
+                                        ft.Container(
+                                            col={"xs": 12, "md": 4},
                                             content=ft.Column(
                                                 spacing=8,
                                                 controls=[
@@ -5864,7 +6016,7 @@ def main(page: ft.Page) -> None:
                                             ),
                                         ),
                                         ft.Container(
-                                            col={"xs": 12, "md": 6},
+                                            col={"xs": 12, "md": 4},
                                             content=ft.Column(
                                                 spacing=8,
                                                 controls=[

@@ -13,6 +13,12 @@ from typing import Any, Callable
 import pandas as pd
 from fastai.tabular.all import load_learner
 
+from ice_creams_feature_modes import (
+    feature_mode_label,
+    infer_feature_mode_from_learner,
+    prepare_feature_dataframe,
+)
+
 
 _CONCEPT_DISPLAY: dict[str, str] = {
     "bare_sediment": "Bare Sediment",
@@ -332,46 +338,6 @@ def _read_validation_table(dataset_path: Path) -> pd.DataFrame:
     return frame
 
 
-def _extract_required_feature_names(learner: Any) -> list[str]:
-    """Extract tabular input feature names from an exported fastai learner."""
-    discovered: list[str] = []
-    seen: set[str] = set()
-
-    def _append(values: Any) -> None:
-        if values is None:
-            return
-        if isinstance(values, str):
-            values_iter = [values]
-        else:
-            try:
-                values_iter = list(values)
-            except TypeError:
-                return
-        for name in values_iter:
-            normalized = str(name).strip()
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                discovered.append(normalized)
-
-    dls = getattr(learner, "dls", None)
-    train_ds = getattr(dls, "train_ds", None) if dls is not None else None
-
-    if dls is not None:
-        _append(getattr(dls, "cat_names", None))
-        _append(getattr(dls, "cont_names", None))
-        _append(getattr(dls, "x_names", None))
-
-    if train_ds is not None:
-        _append(getattr(train_ds, "cat_names", None))
-        _append(getattr(train_ds, "cont_names", None))
-        _append(getattr(train_ds, "x_names", None))
-
-    if not discovered:
-        raise ValueError("Unable to determine required model input features from the learner.")
-
-    return discovered
-
-
 def _extract_vocab(learner: Any) -> list[str]:
     """Extract class vocabulary from learner.dls.vocab."""
     dls = getattr(learner, "dls", None)
@@ -553,23 +519,26 @@ def validate_model(
 
     _emit_status(status_callback, f"Loading model: {model_file.name}")
     learner = load_learner(str(model_file))
+    detected_feature_mode, required_features = infer_feature_mode_from_learner(learner)
+    detected_feature_mode_label = feature_mode_label(detected_feature_mode)
+    _emit_status(
+        status_callback,
+        f"Detected model feature mode: {detected_feature_mode_label}",
+    )
     _emit_progress(progress_callback, 0.32)
 
     _emit_status(status_callback, "Checking required feature columns")
-    required_features = _extract_required_feature_names(learner)
-    missing_features = [name for name in required_features if name not in validation_df.columns]
-    if missing_features:
-        preview = ", ".join(missing_features[:12])
-        suffix = f", +{len(missing_features) - 12} more" if len(missing_features) > 12 else ""
-        raise ValueError(
-            "Validation dataset is missing required model input columns: "
-            f"{preview}{suffix}"
-        )
+    validation_model_df = prepare_feature_dataframe(
+        validation_df,
+        feature_mode=detected_feature_mode,
+        required_feature_names=required_features,
+        context="Validation dataset",
+    )
     _emit_progress(progress_callback, 0.42)
 
     _emit_status(status_callback, "Running model predictions")
-    batch_size = max(512, min(8192, len(validation_df)))
-    test_dl = learner.dls.test_dl(validation_df, bs=batch_size)
+    batch_size = max(512, min(8192, len(validation_model_df)))
+    test_dl = learner.dls.test_dl(validation_model_df, bs=batch_size)
     preds, _ = learner.get_preds(dl=test_dl)
     _emit_progress(progress_callback, 0.74)
 
@@ -697,6 +666,8 @@ def validate_model(
         "predictions_outside_validation_classes": predictions_outside_validation_space,
         "validation_mode": mode_name,
         "target_class": target_class_name,
+        "feature_mode": detected_feature_mode,
+        "feature_mode_label": detected_feature_mode_label,
     }
 
 

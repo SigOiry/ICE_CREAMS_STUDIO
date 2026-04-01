@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-Apply ICE CREAMS to Masked Sentinel-2.
+Apply ICE CREAMS to masked Sentinel-2 or 12-band TIFF imagery.
 
-Takes a trained Neural Network model (saved with pickle) and runs this over a S2 image
-in SAFE format using xarray.
+Takes a trained Neural Network model (saved with pickle) and runs this over a
+Sentinel-2 SAFE scene, a zipped SAFE scene, or a multi-band GeoTIFF using xarray.
 
 Author: Bede Ffinian Rowe Davies 
 Date: 2023-03-30 edited 2025-09-08
@@ -167,6 +167,16 @@ import rioxarray
 from dask.diagnostics import ProgressBar
 from fastai.tabular.all import load_learner
 
+from ice_creams_feature_modes import (
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
+    RAW_BANDS_BY_MODE,
+    SPECTRAL_RAW_BANDS,
+    feature_mode_label,
+    infer_feature_mode_from_learner,
+    prepare_feature_dataframe,
+    raw_column_name,
+)
+
 ## Update .pkl file as new version becomes available.
 
 DEFAULT_FASTAI_MODEL = os.path.join(
@@ -200,6 +210,23 @@ DEFAULT_CLASSIFICATION_BATCH_SIZE = 8192
 MASK_EXTENT_BUFFER_DISTANCE = 60.0
 _MODEL_CACHE: dict[str, tuple[float, object]] = {}
 _INFERENCE_DEVICE: tuple | None = None  # (device, label_str) — populated on first use
+S2_RAW_BAND_FILE_PATTERNS: dict[str, str] = {
+    "B01": "*B01_60m.jp2",
+    "B02": "*B02_10m.jp2",
+    "B03": "*B03_10m.jp2",
+    "B04": "*B04_10m.jp2",
+    "B05": "*B05_20m.jp2",
+    "B06": "*B06_20m.jp2",
+    "B07": "*B07_20m.jp2",
+    "B08": "*B08_10m.jp2",
+    "B8A": "*B8A_20m.jp2",
+    "B09": "*B09_60m.jp2",
+    "B11": "*B11_20m.jp2",
+    "B12": "*B12_20m.jp2",
+}
+S2_NATIVE_10M_BANDS = {"B02", "B03", "B04", "B08"}
+MULTIBAND_TIFF_SUFFIXES = {".tif", ".tiff"}
+TIFF_RAW_BAND_ORDER = SPECTRAL_RAW_BANDS
 
 
 # Substrings (lower-case) that identify integrated or software-renderer adapters.
@@ -545,6 +572,29 @@ def _open_s2_band(
     return clipped_band
 
 
+def _open_multiband_raster(
+    raster_path: str,
+    clip_bounds: tuple[float, float, float, float] | None = None,
+    cleanup_resources: list[object] | None = None,
+) -> xarray.DataArray:
+    """Open one multi-band raster and optionally crop it to buffered mask bounds."""
+    raster = rioxarray.open_rasterio(raster_path, chunks={"x": 512, "y": 512}, masked=True)
+    if cleanup_resources is not None:
+        cleanup_resources.append(raster)
+    if clip_bounds is None:
+        return raster
+
+    clipped_raster = _clip_xarray_to_bounds(raster, clip_bounds)
+    if cleanup_resources is not None:
+        cleanup_resources.append(clipped_raster)
+    if clipped_raster.sizes.get("x", 0) == 0 or clipped_raster.sizes.get("y", 0) == 0:
+        raise ValueError(
+            "Buffered mask extent produced an empty raster crop. "
+            f"Requested crop extent: {_format_bounds(clip_bounds)}."
+        )
+    return clipped_raster
+
+
 def _hex_to_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
     """Convert #RRGGBB color to an RGBA tuple."""
     color_value = hex_color.strip().lstrip("#")
@@ -711,6 +761,10 @@ def _strip_scene_suffixes(scene_name: str) -> str:
     normalized_name = scene_name.strip()
     if normalized_name.lower().endswith(".zip"):
         normalized_name = normalized_name[:-4]
+    if normalized_name.lower().endswith(".tiff"):
+        normalized_name = normalized_name[:-5]
+    elif normalized_name.lower().endswith(".tif"):
+        normalized_name = normalized_name[:-4]
     if normalized_name.upper().endswith(".SAFE"):
         normalized_name = normalized_name[:-5]
     return normalized_name
@@ -871,6 +925,17 @@ def _is_zip_scene_path(path_value: Path, *, allow_filename_hint: bool = False) -
     return bool(_extract_zip_safe_scene_ids(path_value, allow_filename_hint=allow_filename_hint))
 
 
+def _is_multiband_tiff_path(path_value: Path) -> bool:
+    """Return True when the path points to a 12-band TIFF input image."""
+    if not (path_value.is_file() and path_value.suffix.lower() in MULTIBAND_TIFF_SUFFIXES):
+        return False
+    try:
+        with rasterio.open(path_value) as raster:
+            return int(raster.count) == len(TIFF_RAW_BAND_ORDER)
+    except Exception:
+        return False
+
+
 def _derive_scene_id(scene_path: Path) -> str:
     """Extract a format-agnostic scene identifier from a SAFE/ZIP path."""
     scene_name = scene_path.name
@@ -897,6 +962,8 @@ def _scene_format(scene_path: Path) -> str:
     """Return normalized scene format label for UI/backend reporting."""
     if scene_path.suffix.lower() == ".zip":
         return "ZIP"
+    if _is_multiband_tiff_path(scene_path):
+        return "TIFF"
     return "SAFE" if _is_safe_directory_path(scene_path) else "ZIP"
 
 
@@ -921,10 +988,11 @@ def _build_scene_record(
 
 def _select_preferred_scene(candidates: list[dict[str, str | None]]) -> dict[str, str | None]:
     """Select the preferred candidate when the same scene exists as SAFE and ZIP."""
+    format_priority = {"SAFE": 0, "TIFF": 1, "ZIP": 2}
     return sorted(
         candidates,
         key=lambda item: (
-            0 if item["format"] == "SAFE" else 1,
+            format_priority.get(str(item["format"]), 99),
             str(item["path"]).lower(),
         ),
     )[0]
@@ -934,15 +1002,15 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
     """
     Discover scene inputs and return metadata, including duplicate resolution.
 
-    Duplicate scenes are grouped by scene identifier. When both formats are
-    available, SAFE is preferred over ZIP.
+    Duplicate scenes are grouped by scene identifier. When multiple formats are
+    available, SAFE is preferred over TIFF, and TIFF is preferred over ZIP.
     """
     input_path = Path(input_scene_path)
     cached_batch_info = _get_cached_scene_batch_info(input_path)
     if cached_batch_info is not None:
         return cached_batch_info
 
-    if _is_safe_directory_path(input_path) or _is_zip_scene_path(input_path):
+    if _is_safe_directory_path(input_path) or _is_zip_scene_path(input_path) or _is_multiband_tiff_path(input_path):
         selected = [_build_scene_record(input_path)]
         return _store_scene_batch_info(input_path, {
             "input_path": str(input_path),
@@ -954,9 +1022,13 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
             "selected": selected,
             "duplicate_count": 0,
             "duplicate_groups": [],
-            "format_counts": {"SAFE": int(selected[0]["format"] == "SAFE"), "ZIP": int(selected[0]["format"] == "ZIP")},
+            "format_counts": {
+                "SAFE": int(selected[0]["format"] == "SAFE"),
+                "TIFF": int(selected[0]["format"] == "TIFF"),
+                "ZIP": int(selected[0]["format"] == "ZIP"),
+            },
             "acquisition_dates": [selected[0]["acquisition_date"]] if selected[0]["acquisition_date"] else [],
-            "selection_rule": "Prefer .SAFE over .zip when duplicate scenes are found.",
+            "selection_rule": "Prefer .SAFE over .tif/.tiff over .zip when duplicate scenes are found.",
         })
 
     if input_path.is_dir() and input_path.name.upper().endswith(".SAFE"):
@@ -969,9 +1041,14 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
             "Selected .zip does not contain a valid Sentinel-2 .SAFE scene."
         )
 
+    if input_path.is_file() and input_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
+        raise FileNotFoundError(
+            "Selected TIFF input must contain exactly 12 spectral bands."
+        )
+
     if not input_path.is_dir():
         raise FileNotFoundError(
-            "Input scene must be a .SAFE directory, a .zip archive, or a folder containing them."
+            "Input scene must be a .SAFE directory, a .zip archive, a 12-band .tif/.tiff image, or a folder containing them."
         )
 
     discovered_records: list[dict[str, str | None]] = []
@@ -999,31 +1076,45 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
                 ignored_candidates.append(str(safe_dir_path))
 
         for filename in filenames:
-            if not filename.lower().endswith(".zip"):
-                continue
-            zip_path = Path(root) / filename
-            if not _scene_id_from_filename_hint(zip_path):
-                ignored_candidates.append(str(zip_path))
-                continue
-            zip_scene_ids = _extract_zip_safe_scene_ids(zip_path, allow_filename_hint=True)
-            if zip_scene_ids:
-                discovered_records.append(
-                    _build_scene_record(
-                        zip_path,
-                        scene_id=zip_scene_ids[0],
-                        format_label="ZIP",
+            file_path = Path(root) / filename
+            if filename.lower().endswith(".zip"):
+                if not _scene_id_from_filename_hint(file_path):
+                    ignored_candidates.append(str(file_path))
+                    continue
+                zip_scene_ids = _extract_zip_safe_scene_ids(file_path, allow_filename_hint=True)
+                if zip_scene_ids:
+                    discovered_records.append(
+                        _build_scene_record(
+                            file_path,
+                            scene_id=zip_scene_ids[0],
+                            format_label="ZIP",
+                        )
                     )
-                )
-            else:
-                ignored_candidates.append(str(zip_path))
+                else:
+                    ignored_candidates.append(str(file_path))
+                continue
+
+            if file_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
+                if _is_multiband_tiff_path(file_path):
+                    discovered_records.append(
+                        _build_scene_record(
+                            file_path,
+                            scene_id=_strip_scene_suffixes(file_path.name),
+                            format_label="TIFF",
+                        )
+                    )
+                else:
+                    ignored_candidates.append(str(file_path))
 
     if not discovered_records:
         if ignored_candidates:
             raise FileNotFoundError(
-                f"No valid Sentinel-2 scenes were found in {input_scene_path}. "
-                f"Ignored {len(ignored_candidates)} non-Sentinel .SAFE/.zip candidate(s)."
+                f"No valid apply inputs were found in {input_scene_path}. "
+                f"Ignored {len(ignored_candidates)} unsupported .SAFE/.zip/.tif/.tiff candidate(s)."
             )
-        raise FileNotFoundError(f"No .SAFE folders or .zip archives were found in {input_scene_path}")
+        raise FileNotFoundError(
+            f"No .SAFE folders, .zip archives, or 12-band .tif/.tiff files were found in {input_scene_path}"
+        )
 
     grouped_records: dict[str, list[dict[str, str | None]]] = {}
     for record in discovered_records:
@@ -1052,7 +1143,7 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
             str(item["scene_id"]).upper(),
         ),
     )
-    format_counts = {"SAFE": 0, "ZIP": 0}
+    format_counts = {"SAFE": 0, "TIFF": 0, "ZIP": 0}
     for record in selected_records:
         format_counts[str(record["format"])] += 1
 
@@ -1076,7 +1167,7 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
         "duplicate_groups": duplicate_groups,
         "format_counts": format_counts,
         "acquisition_dates": acquisition_dates,
-        "selection_rule": "Prefer .SAFE over .zip when duplicate scenes are found. Ignore non-Sentinel .SAFE/.zip files.",
+        "selection_rule": "Prefer .SAFE over .tif/.tiff over .zip when duplicate inputs are found. Ignore unsupported .SAFE/.zip/.tif/.tiff files.",
     })
 
 
@@ -1147,7 +1238,7 @@ def _prepare_s2_scene_input(
     input_scene_path: str,
     status_callback: Callable[[str], None] | None = None,
 ):
-    """Accept a .SAFE folder directly or extract a zipped SAFE scene to a temp folder."""
+    """Accept a .SAFE folder, zipped SAFE scene, or 12-band TIFF input."""
     input_path = Path(input_scene_path)
 
     if input_path.is_dir():
@@ -1192,8 +1283,16 @@ def _prepare_s2_scene_input(
             _cleanup_temp_dir(temp_dir, status_callback)
         return
 
+    if input_path.is_file() and input_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
+        if not _is_multiband_tiff_path(input_path):
+            raise ValueError(
+                "Input TIFF must contain exactly 12 spectral bands."
+            )
+        yield str(input_path)
+        return
+
     raise FileNotFoundError(
-        "Input scene must be a .SAFE directory or a .zip archive containing one."
+        "Input scene must be a .SAFE directory, a .zip archive containing one, or a 12-band .tif/.tiff image."
     )
 
 
@@ -1229,56 +1328,72 @@ def build_s2_mask_scl_mask(scl_data):
     return mask
 
 
-def _get_s2_files_from_safe(input_s2_safe) -> dict:
-    """ "
-    Function to get the required jp2 files for a scene from within a .SAFE file
-    """
-    output_files_dict = {}
+def _find_required_safe_file(input_s2_safe: str, pattern: str, description: str) -> str:
+    """Find one required file inside a Sentinel-2 SAFE scene."""
+    matches = glob.glob(os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", pattern))
+    if not matches:
+        raise FileNotFoundError(
+            f"Could not locate required Sentinel-2 {description} file in {input_s2_safe}."
+        )
+    return matches[0]
 
-    # Find jp2 files
-    output_files_dict["b01_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B01_60m.jp2")
-    )[0]
-    output_files_dict["b02_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B02_10m.jp2")
-    )[0]
-    output_files_dict["b03_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B03_10m.jp2")
-    )[0]
-    output_files_dict["b04_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B04_10m.jp2")
-    )[0]
-    output_files_dict["b05_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B05_20m.jp2")
-    )[0]
-    output_files_dict["b06_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B06_20m.jp2")
-    )[0]
-    output_files_dict["b07_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B07_20m.jp2")
-    )[0]
-    output_files_dict["b08_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B08_10m.jp2")
-    )[0]
-    output_files_dict["b08a_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B8A_20m.jp2")
-    )[0]
-    output_files_dict["b09_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B09_60m.jp2")
-    )[0]
-    output_files_dict["b11_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B11_20m.jp2")
-    )[0]
-    output_files_dict["b12_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*B12_20m.jp2")
-    )[0]
-    output_files_dict["scl_file"] = glob.glob(
-        os.path.join(input_s2_safe, "GRANULE/*/IMG_DATA", "R??m", "*SCL_20m.jp2")
-    )[0]
-    
-    output_files_dict["processing_base_line"] = int(os.path.basename(input_s2_safe.rstrip("/")).split("_")[3][1:5])
+
+def _get_s2_files_from_safe(
+    input_s2_safe,
+    required_raw_bands: tuple[str, ...] | list[str] | None = None,
+) -> dict:
+    """Find the required raw-band and SCL jp2 files inside a .SAFE scene."""
+    output_files_dict: dict[str, object] = {}
+    ordered_raw_bands = tuple(
+        dict.fromkeys(required_raw_bands or RAW_BANDS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY])
+    )
+
+    if "B02" not in ordered_raw_bands:
+        raise ValueError("Sentinel-2 feature extraction requires B02 as the 10 m reference grid.")
+
+    for band_name in ordered_raw_bands:
+        pattern = S2_RAW_BAND_FILE_PATTERNS.get(band_name)
+        if pattern is None:
+            raise ValueError(f"Unsupported Sentinel-2 raw band requested: {band_name}")
+        output_files_dict[f"{band_name.lower()}_file"] = _find_required_safe_file(
+            input_s2_safe,
+            pattern,
+            f"{band_name} band",
+        )
+
+    output_files_dict["scl_file"] = _find_required_safe_file(
+        input_s2_safe,
+        "*SCL_20m.jp2",
+        "SCL mask",
+    )
+    output_files_dict["required_raw_bands"] = ordered_raw_bands
+    output_files_dict["processing_base_line"] = int(
+        os.path.basename(input_s2_safe.rstrip("/\\")).split("_")[3][1:5]
+    )
 
     return output_files_dict
+
+
+def _first_available_raw_reflectance_name(
+    dataset: xarray.Dataset,
+    preferred_feature_names: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Return the first available raw reflectance variable in a dataset."""
+    preferred_raw_names: list[str] = []
+    for feature_name in preferred_feature_names or ():
+        normalized = str(feature_name).strip()
+        if normalized.startswith("Reflectance_B") and not normalized.startswith("Reflectance_Stan_"):
+            preferred_raw_names.append(normalized)
+
+    for variable_name in preferred_raw_names:
+        if variable_name in dataset.data_vars:
+            return variable_name
+
+    for variable_name in dataset.data_vars:
+        if variable_name.startswith("Reflectance_B") and not variable_name.startswith("Reflectance_Stan_"):
+            return variable_name
+
+    raise ValueError("No raw reflectance variables are available in the Sentinel-2 dataset.")
 
 
 def _read_s2_data_xarray(
@@ -1297,6 +1412,12 @@ def _read_s2_data_xarray(
     clip_bounds: tuple[float, float, float, float] | None = None
     mask_vector: geopandas.GeoDataFrame | None = None
     opened_raster_resources: list[object] = []
+    ordered_raw_bands = tuple(
+        dict.fromkeys(
+            input_s2_files.get("required_raw_bands")
+            or RAW_BANDS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY]
+        )
+    )
 
     try:
         # Open the 10 m reference grid first so m1 can be aligned before any heavy resampling.
@@ -1348,61 +1469,16 @@ def _read_s2_data_xarray(
             )
 
         # Read the remaining bands and apply the buffered-extent crop (m2) before resampling to 10 m.
-        b01 = _open_s2_band(
-            input_s2_files["b01_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b03 = _open_s2_band(
-            input_s2_files["b03_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b04 = _open_s2_band(
-            input_s2_files["b04_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b05 = _open_s2_band(
-            input_s2_files["b05_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b06 = _open_s2_band(
-            input_s2_files["b06_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b07 = _open_s2_band(
-            input_s2_files["b07_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b08 = _open_s2_band(
-            input_s2_files["b08_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b08a = _open_s2_band(
-            input_s2_files["b08a_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b09 = _open_s2_band(
-            input_s2_files["b09_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b11 = _open_s2_band(
-            input_s2_files["b11_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
-        b12 = _open_s2_band(
-            input_s2_files["b12_file"],
-            clip_bounds=clip_bounds,
-            cleanup_resources=opened_raster_resources,
-        )
+        opened_raw_bands: dict[str, xarray.DataArray] = {"B02": b02}
+        for band_name in ordered_raw_bands:
+            if band_name == "B02":
+                continue
+            opened_raw_bands[band_name] = _open_s2_band(
+                input_s2_files[f"{band_name.lower()}_file"],
+                clip_bounds=clip_bounds,
+                cleanup_resources=opened_raster_resources,
+            )
+
         scl = _open_s2_band(
             input_s2_files["scl_file"],
             clip_bounds=clip_bounds,
@@ -1411,40 +1487,27 @@ def _read_s2_data_xarray(
 
 
         # Bias removed for images after 2022 using baseline processor after 400
-        
+
         if input_s2_files["processing_base_line"] > 399:
-            for band in [b01, b02, b03, b04, b05, b06, b07, b08, b08a, b09, b11, b12]:
+            for band in opened_raw_bands.values():
                 band.data = band.data - 1000
 
         _emit_status(status_callback, "Resampling buffered Sentinel-2 bands to 10 m")
-        b01_10m = b01.reindex_like(b02, method="nearest")
-        b05_10m = b05.reindex_like(b02, method="nearest")
-        b06_10m = b06.reindex_like(b02, method="nearest")
-        b07_10m = b07.reindex_like(b02, method="nearest")
-        b08a_10m = b08a.reindex_like(b02, method="nearest")
-        b11_10m = b11.reindex_like(b02, method="nearest")
-        b12_10m = b12.reindex_like(b02, method="nearest")
-        b09_10m = b09.reindex_like(b02, method="nearest")
+        resampled_raw_bands: dict[str, xarray.DataArray] = {}
+        for band_name, band_data in opened_raw_bands.items():
+            if band_name in S2_NATIVE_10M_BANDS:
+                resampled_raw_bands[band_name] = band_data
+            else:
+                resampled_raw_bands[band_name] = band_data.reindex_like(b02, method="nearest")
         scl_10m = scl.reindex_like(b02, method="nearest")
 
         # Save all to one Raw dataset
-        s2_data_raw = xarray.Dataset(
-            {
-                "Reflectance_B01": b01_10m,
-                "Reflectance_B02": b02,
-                "Reflectance_B03": b03,
-                "Reflectance_B04": b04,
-                "Reflectance_B05": b05_10m,
-                "Reflectance_B06": b06_10m,
-                "Reflectance_B07": b07_10m,
-                "Reflectance_B08": b08,
-                "Reflectance_B8A": b08a_10m,
-                "Reflectance_B09": b09_10m,
-                "Reflectance_B11": b11_10m,
-                "Reflectance_B12": b12_10m,
-                "SCL": scl_10m,
-            }
-        )
+        dataset_vars = {
+            raw_column_name(band_name): resampled_raw_bands[band_name]
+            for band_name in ordered_raw_bands
+        }
+        dataset_vars["SCL"] = scl_10m
+        s2_data_raw = xarray.Dataset(dataset_vars)
         # Set CRS
         s2_data_raw.rio.write_crs(b02.rio.crs)
 
@@ -1454,9 +1517,10 @@ def _read_s2_data_xarray(
 
         if mask_vector is not None:
             _emit_status(status_callback, "Applying original mask polygon (m1) to 10 m pixels")
+            template_var_name = _first_available_raw_reflectance_name(s2_data_raw)
             mask_raster = rasterio.features.geometry_mask(
                 mask_vector.geometry,
-                out_shape=s2_data_raw.Reflectance_B01.shape[1:],
+                out_shape=s2_data_raw[template_var_name].shape[1:],
                 transform=s2_data_raw.rio.transform(recalc=True),
             )
             s2_data_raw = s2_data_raw.where(~mask_raster)
@@ -1478,12 +1542,16 @@ def read_s2_safe(
     mask_vector_file=None,
     verbose_console: bool = True,
     status_callback: Callable[[str], None] | None = None,
+    required_raw_bands: tuple[str, ...] | list[str] | None = None,
 ):
     """
     Function to read S2 data from SAFE file and return as a Dataset with
     bands resampled to 10m
     """
-    s2_files_dict = _get_s2_files_from_safe(input_s2_safe)
+    s2_files_dict = _get_s2_files_from_safe(
+        input_s2_safe,
+        required_raw_bands=required_raw_bands,
+    )
     return _read_s2_data_xarray(
         s2_files_dict,
         mask_vector_file,
@@ -1491,50 +1559,112 @@ def read_s2_safe(
         status_callback=status_callback,
     )
 
-def standerdise_reflectance(s2_data_raw):
-    """
-    Standardise reflectance by scaling from 0 - 1 where 1 is the maximum value for each
-    band of a pixel.
 
-    Returns as a separate xarray
-
-    """
-    data_vars_list = []
-    # Go through each data variable
-    for data_var in s2_data_raw.data_vars:
-        # Don't mask study site
-        if data_var in ["study_site", "SCL"]:
-            continue
-        else:
-            data_vars_list.append(data_var)
-
-    # Calculate the min and max across all bands for each pixel.
-    # xarray ignores NaN values when computing min/max.
-    s2_data_raw_array = s2_data_raw[data_vars_list].to_array(dim="wavelength")
-    var_min = s2_data_raw_array.min(dim="wavelength")
-    var_max = s2_data_raw_array.max(dim="wavelength")
-    var_range = var_max - var_min
-
-    # Guard against division by zero: pixels where all bands are identical
-    # (var_range == 0) would produce NaN/Inf and corrupt model inputs.
-    # Use 1.0 as a safe denominator for those pixels; the xarray.where below
-    # then forces the output to 0.0 for them anyway.
-    safe_range = var_range.where(var_range > 0, other=1.0)
-    s2_data_standardised = xarray.where(
-        var_range > 0,
-        (s2_data_raw[data_vars_list] - var_min) / safe_range,
-        0.0,
+def read_multiband_tiff(
+    input_raster_path: str,
+    mask_vector_file=None,
+    verbose_console: bool = True,
+    status_callback: Callable[[str], None] | None = None,
+    required_raw_bands: tuple[str, ...] | list[str] | None = None,
+):
+    """Read a 12-band TIFF image and return a Dataset of raw reflectance bands."""
+    clip_bounds: tuple[float, float, float, float] | None = None
+    mask_vector: geopandas.GeoDataFrame | None = None
+    opened_raster_resources: list[object] = []
+    ordered_raw_bands = tuple(
+        dict.fromkeys(required_raw_bands or RAW_BANDS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY])
     )
 
-    update_names = {
-        data_var: data_var.replace("Reflectance_", "Reflectance_Stan_")
-        for data_var in data_vars_list
-    }
+    try:
+        raster_stack = _open_multiband_raster(
+            input_raster_path,
+            cleanup_resources=opened_raster_resources,
+        )
+        band_count = int(raster_stack.sizes.get("band", 0))
+        if band_count != len(TIFF_RAW_BAND_ORDER):
+            raise ValueError(
+                f"Input TIFF must contain exactly {len(TIFF_RAW_BAND_ORDER)} bands in Sentinel-2 spectral order. "
+                f"Found {band_count} band(s)."
+            )
 
-    # Rename variables
-    s2_data_standardised = s2_data_standardised.rename_vars(update_names)
+        reference_band = (
+            raster_stack.sel(band=1, drop=True)
+            .expand_dims(dim={"band": [1]})
+            .transpose("band", "y", "x")
+        )
 
-    return s2_data_standardised
+        if mask_vector_file is not None:
+            _emit_status(status_callback, f"Opening mask polygon (m1) from {mask_vector_file}")
+            _console_log(f"Masking raster to {mask_vector_file}", verbose_console)
+            mask_vector = geopandas.read_file(mask_vector_file)
+            mask_vector = _align_mask_vector_to_scene(
+                mask_vector,
+                mask_vector_file,
+                reference_band,
+                verbose_console=verbose_console,
+            )
+
+            mask_bounds = tuple(float(value) for value in mask_vector.total_bounds)
+            scene_bounds = tuple(float(value) for value in reference_band.rio.bounds(recalc=True))
+            clip_bounds = _bounds_intersection(
+                _expand_bounds(
+                    mask_bounds,
+                    MASK_EXTENT_BUFFER_DISTANCE,
+                    MASK_EXTENT_BUFFER_DISTANCE,
+                ),
+                scene_bounds,
+            )
+            if clip_bounds is None:
+                raise ValueError(
+                    "Buffered mask extent does not intersect the input raster extent. "
+                    f"Mask extent: {_format_bounds(mask_bounds)}. "
+                    f"Raster extent: {_format_bounds(scene_bounds)}."
+                )
+
+            _emit_status(
+                status_callback,
+                f"Applying buffered extent mask (m2) with {int(MASK_EXTENT_BUFFER_DISTANCE)} m padding",
+            )
+            raster_stack = _open_multiband_raster(
+                input_raster_path,
+                clip_bounds=clip_bounds,
+                cleanup_resources=opened_raster_resources,
+            )
+
+        _emit_status(status_callback, "Using TIFF input grid directly (no spatial resampling)")
+        dataset_vars: dict[str, xarray.DataArray] = {}
+        for band_name in ordered_raw_bands:
+            band_index = TIFF_RAW_BAND_ORDER.index(band_name) + 1
+            dataset_vars[raw_column_name(band_name)] = (
+                raster_stack.sel(band=band_index, drop=True)
+                .expand_dims(dim={"band": [1]})
+                .transpose("band", "y", "x")
+            )
+
+        raster_data = xarray.Dataset(dataset_vars)
+        raster_data.rio.write_crs(raster_stack.rio.crs)
+
+        if mask_vector is not None:
+            _emit_status(status_callback, "Applying original mask polygon (m1) to raster pixels")
+            template_var_name = _first_available_raw_reflectance_name(raster_data)
+            mask_raster = rasterio.features.geometry_mask(
+                mask_vector.geometry,
+                out_shape=raster_data[template_var_name].shape[1:],
+                transform=raster_data.rio.transform(recalc=True),
+            )
+            raster_data = raster_data.where(~mask_raster)
+            raster_data["study_site"] = xarray.DataArray(
+                data=numpy.expand_dims(mask_raster, axis=0),
+                dims=raster_data.dims,
+                coords=raster_data.coords,
+            )
+
+        _emit_status(status_callback, "No SCL mask is available for TIFF input; skipping SCL masking")
+        raster_data.set_close(lambda: _close_xarray_resources(opened_raster_resources))
+        return raster_data
+    except Exception:
+        _close_xarray_resources(opened_raster_resources)
+        raise
 
 
 def calc_ndvi_true(s2_data_raw):
@@ -1585,6 +1715,8 @@ def calc_spc(ndvi):
 def apply_classification(
     input_xarray,
     class_model,
+    feature_mode: str,
+    required_feature_names: list[str] | tuple[str, ...],
     batch_size: int | None = None,
     dask_workers: int = DEFAULT_DASK_WORKERS,
     status_callback: Callable[[str], None] | None = None,
@@ -1607,7 +1739,11 @@ def apply_classification(
         inference_batch_size = max(1, int(batch_size))
 
     stacked_data = input_xarray.stack(pixel=("y", "x")).squeeze(dim="band", drop=True)
-    pixel_template = stacked_data["Reflectance_B01"]
+    pixel_template_name = _first_available_raw_reflectance_name(
+        stacked_data,
+        preferred_feature_names=list(required_feature_names),
+    )
+    pixel_template = stacked_data[pixel_template_name]
     valid_mask = pixel_template.notnull()
     valid_positions = numpy.flatnonzero(valid_mask.values)
     pixel_count = int(stacked_data.sizes.get("pixel", 0))
@@ -1623,40 +1759,36 @@ def apply_classification(
             f"Preparing {valid_positions.size:,} masked pixel(s) for model inference",
         )
         _emit_progress(progress_callback, 0.70)
-        # Skip Reflectance_Stan_* bands in the dask load: per-pixel standardization
-        # (min/max across all bands for a single pixel) is computed in numpy below,
-        # which costs nothing extra because the raw bands are already in memory.
-        stan_prefix = "Reflectance_Stan_"
-        vars_to_load = [v for v in stacked_data.data_vars if not v.startswith(stan_prefix)]
+        vars_to_load = list(
+            dict.fromkeys(
+                [
+                    *[
+                        feature_name
+                        for feature_name in required_feature_names
+                        if feature_name.startswith("Reflectance_B")
+                        and not feature_name.startswith("Reflectance_Stan_")
+                    ],
+                    "NDVI",
+                    "NDWI",
+                    "SPC",
+                ]
+            )
+        )
         valid_pixels = stacked_data[vars_to_load].isel(pixel=valid_positions)
         with dask.config.set(scheduler="threads", num_workers=worker_count):
             valid_pixels_computed = valid_pixels.compute()
 
-        data_dict = {var: valid_pixels_computed[var].values for var in valid_pixels_computed.data_vars}
-
-        # Per-pixel standardization in numpy.
-        # For each valid pixel: scale every reflectance band to [0, 1] using that
-        # pixel's own min and max across all bands.  The raw band values are already
-        # in memory, so this is pure arithmetic — no extra disk reads.
-        raw_band_vars = sorted(v for v in data_dict if v.startswith("Reflectance_B"))
-        raw_band_matrix = numpy.stack(
-            [data_dict[v] for v in raw_band_vars], axis=0
-        ).astype(numpy.float32)  # shape: (n_bands, n_valid_pixels)
-        var_min_np = numpy.nanmin(raw_band_matrix, axis=0)  # (n_valid,) — per-pixel min
-        var_max_np = numpy.nanmax(raw_band_matrix, axis=0)  # (n_valid,) — per-pixel max
-        var_range_np = var_max_np - var_min_np
-        safe_range_np = numpy.where(var_range_np > 0, var_range_np, 1.0)
-        uniform_mask = var_range_np > 0  # pixels where all bands have the same value → 0.0
-
-        for band_var in raw_band_vars:
-            stan_name = band_var.replace("Reflectance_", "Reflectance_Stan_")
-            data_dict[stan_name] = numpy.where(
-                uniform_mask,
-                (data_dict[band_var].astype(numpy.float32) - var_min_np) / safe_range_np,
-                0.0,
-            )
-
-        valid_df = pandas.DataFrame(data_dict).fillna(0)
+        raw_feature_df = pandas.DataFrame(
+            {var: valid_pixels_computed[var].values for var in valid_pixels_computed.data_vars}
+        )
+        valid_df = prepare_feature_dataframe(
+            raw_feature_df,
+            feature_mode=feature_mode,
+            required_feature_names=required_feature_names,
+            context="Apply pixel dataframe",
+            rebuild_standardised=True,
+            rebuild_indices=True,
+        ).fillna(0)
 
         _emit_status(
             status_callback,
@@ -1671,7 +1803,7 @@ def apply_classification(
         predicted_classes = preds.argmax(dim=1).cpu().numpy().astype(numpy.int16)
         predicted_probs = preds.max(dim=1).values.cpu().numpy().astype(numpy.float32)
 
-        spc_values = valid_df["SPC"].to_numpy(dtype=numpy.float32, copy=True)
+        spc_values = raw_feature_df["SPC"].to_numpy(dtype=numpy.float32, copy=True)
         spc_values = numpy.clip(spc_values, 0, 100)
         seagrass_mask = (predicted_classes == 3) & (spc_values >= 20)
         spc20_values = numpy.where(seagrass_mask, spc_values, -1.0).astype(numpy.float32)
@@ -1686,7 +1818,7 @@ def apply_classification(
         ndvi_out_values[valid_positions] = valid_df["NDVI"].to_numpy(dtype=numpy.float32, copy=True)
 
     output_vars = {}
-    band_coord = input_xarray["Reflectance_B01"].coords["band"]
+    band_coord = input_xarray[pixel_template_name].coords["band"]
     output_specs = {
         "Out_Class": out_class_values,
         "Class_Probs": class_probs_values,
@@ -1739,25 +1871,44 @@ def classify_s2_scene(
         _emit_progress(progress_callback, 0.05)
         class_model = _load_cached_learner(saved_model, status_callback=status_callback)
         _emit_progress(progress_callback, 0.12)
+    detected_feature_mode, required_feature_names = infer_feature_mode_from_learner(class_model)
+    detected_feature_mode_label = feature_mode_label(detected_feature_mode)
+    required_raw_bands = RAW_BANDS_BY_MODE[detected_feature_mode]
+    _emit_status(
+        status_callback,
+        f"Detected model feature mode: {detected_feature_mode_label}",
+    )
 
     # Keep the extracted zip contents alive for the full workflow.
     with _prepare_s2_scene_input(input_s2_safe, status_callback) as resolved_scene_path:
         s2_data_raw = None
-        s2_data_stan = None
         s2_data = None
         Out_Classified_s2_data = None
         output_raster = None
         try:
+            resolved_input_path = Path(resolved_scene_path)
             # Open scene into xarray dataset
             # Specify chunksize so uses dask and doesn't load all data to RAM
-            _emit_status(status_callback, f"Reading Sentinel-2 scene from {resolved_scene_path}")
-            _console_log(f"Reading in data from {resolved_scene_path}...", verbose_console)
-            s2_data_raw = read_s2_safe(
-                resolved_scene_path,
-                mask_vector_file,
-                verbose_console=verbose_console,
-                status_callback=status_callback,
-            )
+            if resolved_input_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
+                _emit_status(status_callback, f"Reading multi-band TIFF from {resolved_scene_path}")
+                _console_log(f"Reading in TIFF data from {resolved_scene_path}...", verbose_console)
+                s2_data_raw = read_multiband_tiff(
+                    resolved_scene_path,
+                    mask_vector_file,
+                    verbose_console=verbose_console,
+                    status_callback=status_callback,
+                    required_raw_bands=required_raw_bands,
+                )
+            else:
+                _emit_status(status_callback, f"Reading Sentinel-2 scene from {resolved_scene_path}")
+                _console_log(f"Reading in data from {resolved_scene_path}...", verbose_console)
+                s2_data_raw = read_s2_safe(
+                    resolved_scene_path,
+                    mask_vector_file,
+                    verbose_console=verbose_console,
+                    status_callback=status_callback,
+                    required_raw_bands=required_raw_bands,
+                )
             _emit_progress(progress_callback, 0.35)
 
             # Calculate NDVI, NDWI and SPC
@@ -1780,6 +1931,8 @@ def classify_s2_scene(
             Out_Classified_s2_data = apply_classification(
                 s2_data,
                 class_model,
+                detected_feature_mode,
+                required_feature_names,
                 status_callback=status_callback,
                 progress_callback=progress_callback,
             )
@@ -1830,14 +1983,16 @@ def classify_s2_scene(
 
             _console_log(f"Saved to {output_gtiff}", verbose_console)
             _emit_progress(progress_callback, 1.0)
-            _emit_status(status_callback, f"Completed. Output saved to {output_gtiff}")
+            _emit_status(
+                status_callback,
+                f"Completed ({detected_feature_mode_label}). Output saved to {output_gtiff}",
+            )
             return output_gtiff
         finally:
             for dataset in (
                 output_raster,
                 Out_Classified_s2_data,
                 s2_data,
-                s2_data_stan,
                 s2_data_raw,
             ):
                 if dataset is not None and hasattr(dataset, "close"):
@@ -1852,7 +2007,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "insafe",
-        help="Input Sentinel-2 .SAFE folder or a .zip archive containing a .SAFE scene",
+        help="Input .SAFE folder, .zip archive containing a .SAFE scene, or 12-band .tif/.tiff image",
     )
     parser.add_argument("outfile", help="Output file for classification")
     parser.add_argument(

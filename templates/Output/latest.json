@@ -2,13 +2,13 @@
   "manifest_version": 1,
   "app_name": "ICE CREAMS Studio",
   "channel": "stable",
-  "version": "1.0.21",
+  "version": "1.0.22",
   "mandatory": false,
-  "published_at": "2026-03-17T16:08:31+01:00",
-  "installer_name": "ICE_CREAMS_Installer_1_0_21.exe",
-  "installer_path": "templates/Output/ICE_CREAMS_Installer_1_0_21.exe",
-  "installer_url": "https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_21.exe",
-  "size_bytes": 331203383,
-  "sha256": "3A01C3795014EDC054110A11486A09754B452D7B4A905968FD44B977E4B0D312",
-  "release_notes_url": "https://github.com/SigOiry/ICE_CREAMS_STUDIO/blob/main/README.md"
+  "published_at": "2026-04-01T18:50:37.6591024+02:00",
+  "installer_name": "ICE_CREAMS_Installer_1_0_22.exe",
+  "installer_path": "templates/Output/ICE_CREAMS_Installer_1_0_22.exe",
+  "installer_url": "https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_22.exe",
+  "size_bytes": 329376146,
+  "sha256": "888709D47C04172E1B697F8AED7A844570752F39AA141C11A4E5F3C506D7E317",
+  "release_notes_url": "https://github.com/SigOiry/ICE_CREAMS_STUDIO/blob/main/PATCHNOTES.md"
 }
