@@ -166,6 +166,7 @@ import rasterio
 import rioxarray
 from dask.diagnostics import ProgressBar
 from fastai.tabular.all import load_learner
+from scipy import ndimage
 
 from ice_creams_feature_modes import (
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
@@ -179,6 +180,13 @@ from ice_creams_model_families import (
     predict_model_probabilities,
     prepare_sequence_feature_dataframe,
     spectral_cnn_sequence_input_label,
+)
+from ice_creams_specialist_models import (
+    SPECIALIST_RAW_BANDS,
+    extract_class45_specialist_metadata,
+    is_class45_specialist_model_path,
+    predict_class45_specialist,
+    resolve_class45_specialist_model_path,
 )
 
 ## Update .pkl file as new version becomes available.
@@ -215,6 +223,10 @@ MASK_EXTENT_BUFFER_DISTANCE = 60.0
 CLASS4_TO_CLASS5_NDVI_THRESHOLD = 0.25
 MODEL_CLASS_INDEX_4 = 3
 MODEL_CLASS_INDEX_5 = 4
+MODEL_CLASS_INDEX_8 = 7
+SALT_PEPPER_NEIGHBORHOOD_RADIUS_PIXELS = 2
+SALT_PEPPER_MIN_VALID_NEIGHBORS = 8
+SALT_PEPPER_MAX_PATCH_SIZE_PIXELS = 9
 _MODEL_CACHE: dict[str, tuple[float, object]] = {}
 _INFERENCE_DEVICE: tuple | None = None  # (device, label_str) — populated on first use
 S2_RAW_BAND_FILE_PATTERNS: dict[str, str] = {
@@ -1719,6 +1731,24 @@ def calc_spc(ndvi):
     return spc
 
 
+def apply_pre_smoothing_post_classification_rules(
+    predicted_classes: numpy.ndarray,
+    ndwi_values: numpy.ndarray,
+) -> tuple[numpy.ndarray, numpy.ndarray]:
+    """
+    Apply deterministic rules before small-patch smoothing.
+
+    Rule: when NDWI is positive, reclassify the pixel to output Class 8
+    (zero-based index 7) before salt-and-pepper cleanup runs.
+    """
+    updated_classes = numpy.asarray(predicted_classes, dtype=numpy.int16).copy()
+    ndwi_array = numpy.asarray(ndwi_values, dtype=numpy.float32)
+    ndwi_water_mask = numpy.isfinite(ndwi_array) & (ndwi_array > 0)
+    if ndwi_water_mask.any():
+        updated_classes[ndwi_water_mask] = MODEL_CLASS_INDEX_8
+    return updated_classes, ndwi_water_mask
+
+
 def apply_post_classification_rules(
     predicted_classes: numpy.ndarray,
     ndvi_values: numpy.ndarray,
@@ -1742,10 +1772,122 @@ def apply_post_classification_rules(
     return updated_classes, reclassified_mask
 
 
+def remove_small_class_patches(
+    predicted_class_grid: numpy.ndarray,
+    valid_mask_grid: numpy.ndarray,
+) -> tuple[numpy.ndarray, numpy.ndarray]:
+    """
+    Reclassify small class patches using the unique local majority.
+
+    ICE CREAMS uses a radius of 2 pixels, which corresponds to a 5x5 window on
+    the 10 m output grid, and targets connected 8-neighbour patches up to
+    SALT_PEPPER_MAX_PATCH_SIZE_PIXELS pixels in size. A patch is only replaced
+    when the surrounding valid pixels are numerous enough and one neighbouring
+    class holds a strict majority.
+    """
+    class_grid = numpy.asarray(predicted_class_grid, dtype=numpy.int16)
+    valid_grid = numpy.asarray(valid_mask_grid, dtype=bool)
+    if class_grid.shape != valid_grid.shape:
+        raise ValueError("Salt-and-pepper cleanup expects class and valid-mask grids with matching shapes.")
+    if class_grid.ndim != 2:
+        raise ValueError("Salt-and-pepper cleanup expects 2D class and valid-mask grids.")
+    if not valid_grid.any():
+        return class_grid.copy(), numpy.zeros_like(valid_grid, dtype=bool)
+
+    height, width = class_grid.shape
+    radius = int(max(1, SALT_PEPPER_NEIGHBORHOOD_RADIUS_PIXELS))
+    max_patch_size = int(max(1, SALT_PEPPER_MAX_PATCH_SIZE_PIXELS))
+    updated_grid = class_grid.copy()
+    cleaned_mask = numpy.zeros_like(valid_grid, dtype=bool)
+    connectivity_structure = numpy.ones((3, 3), dtype=numpy.uint8)
+
+    for component_class in numpy.unique(class_grid[valid_grid]):
+        class_mask = valid_grid & (class_grid == int(component_class))
+        if not class_mask.any():
+            continue
+
+        labeled_components, component_count = ndimage.label(
+            class_mask,
+            structure=connectivity_structure,
+        )
+        if component_count == 0:
+            continue
+
+        component_sizes = numpy.bincount(labeled_components.ravel(), minlength=component_count + 1)
+        component_slices = ndimage.find_objects(labeled_components)
+        small_component_ids = numpy.flatnonzero(
+            (component_sizes[1:] > 0) & (component_sizes[1:] <= max_patch_size)
+        ) + 1
+
+        for component_id in small_component_ids.tolist():
+            component_slice = component_slices[component_id - 1]
+            if component_slice is None:
+                continue
+
+            row_slice, col_slice = component_slice
+            local_labels = labeled_components[row_slice, col_slice]
+            local_component_mask = local_labels == component_id
+            component_rows, component_cols = numpy.nonzero(local_component_mask)
+            if component_rows.size == 0:
+                continue
+
+            min_row = max(0, row_slice.start - radius)
+            max_row = min(height, row_slice.stop + radius)
+            min_col = max(0, col_slice.start - radius)
+            max_col = min(width, col_slice.stop + radius)
+
+            surrounding_mask = valid_grid[min_row:max_row, min_col:max_col].copy()
+            local_row_start = row_slice.start - min_row
+            local_row_stop = local_row_start + (row_slice.stop - row_slice.start)
+            local_col_start = col_slice.start - min_col
+            local_col_stop = local_col_start + (col_slice.stop - col_slice.start)
+            surrounding_mask[
+                local_row_start:local_row_stop,
+                local_col_start:local_col_stop,
+            ] &= ~local_component_mask
+            surrounding_count = int(surrounding_mask.sum())
+            if surrounding_count < SALT_PEPPER_MIN_VALID_NEIGHBORS:
+                continue
+
+            surrounding_classes = class_grid[min_row:max_row, min_col:max_col][surrounding_mask]
+            if surrounding_classes.size == 0:
+                continue
+
+            class_counts = numpy.bincount(surrounding_classes.astype(numpy.int16, copy=False))
+            max_count = int(class_counts.max(initial=0))
+            if max_count <= surrounding_classes.size / 2:
+                continue
+            majority_classes = numpy.flatnonzero(class_counts == max_count)
+            if len(majority_classes) != 1:
+                continue
+
+            replacement_class = int(majority_classes[0])
+            if replacement_class == int(component_class):
+                continue
+
+            component_rows = component_rows + row_slice.start
+            component_cols = component_cols + col_slice.start
+            updated_grid[component_rows, component_cols] = replacement_class
+            cleaned_mask[component_rows, component_cols] = True
+
+    return updated_grid, cleaned_mask
+
+
+def remove_isolated_class_pixels(
+    predicted_class_grid: numpy.ndarray,
+    valid_mask_grid: numpy.ndarray,
+) -> tuple[numpy.ndarray, numpy.ndarray]:
+    """Backward-compatible alias for the small-patch salt-and-pepper cleanup."""
+    return remove_small_class_patches(predicted_class_grid, valid_mask_grid)
+
+
 def apply_classification(
     input_xarray,
     class_model,
     model_metadata: dict[str, object],
+    specialist_model=None,
+    specialist_model_metadata: dict[str, object] | None = None,
+    apply_salt_pepper_cleanup: bool = True,
     batch_size: int | None = None,
     dask_workers: int = DEFAULT_DASK_WORKERS,
     status_callback: Callable[[str], None] | None = None,
@@ -1791,6 +1933,14 @@ def apply_classification(
             f"Preparing {valid_positions.size:,} masked pixel(s) for model inference",
         )
         _emit_progress(progress_callback, 0.70)
+        specialist_raw_columns = (
+            [
+                raw_column_name(band_name)
+                for band_name in specialist_model_metadata.get("specialist_raw_bands", SPECIALIST_RAW_BANDS)
+            ]
+            if isinstance(specialist_model_metadata, dict)
+            else []
+        )
         vars_to_load = list(
             dict.fromkeys(
                 [
@@ -1800,6 +1950,7 @@ def apply_classification(
                         if feature_name.startswith("Reflectance_B")
                         and not feature_name.startswith("Reflectance_Stan_")
                     ],
+                    *specialist_raw_columns,
                     "NDVI",
                     "NDWI",
                     "SPC",
@@ -1846,6 +1997,64 @@ def apply_classification(
         predicted_classes = preds.argmax(dim=1).cpu().numpy().astype(numpy.int16)
         predicted_probs = preds.max(dim=1).values.cpu().numpy().astype(numpy.float32)
         ndvi_values = raw_feature_df["NDVI"].to_numpy(dtype=numpy.float32, copy=True)
+        ndwi_values = raw_feature_df["NDWI"].to_numpy(dtype=numpy.float32, copy=True)
+        if specialist_model is not None and isinstance(specialist_model_metadata, dict):
+            specialist_candidate_mask = numpy.isin(
+                predicted_classes + 1,
+                numpy.asarray(
+                    specialist_model_metadata.get("specialist_target_output_class_ids") or (4, 5),
+                    dtype=numpy.int16,
+                ),
+            )
+            if specialist_candidate_mask.any():
+                _emit_status(
+                    status_callback,
+                    (
+                        "Refining "
+                        f"{int(specialist_candidate_mask.sum()):,} Class 4/5 candidate pixel(s) "
+                        "with the specialist model"
+                    ),
+                )
+                _emit_progress(progress_callback, 0.80)
+                try:
+                    specialist_main_class_ids, specialist_probs, _ = predict_class45_specialist(
+                        raw_feature_df.loc[specialist_candidate_mask].reset_index(drop=True),
+                        specialist_model,
+                        specialist_model_metadata,
+                        batch_size=inference_batch_size,
+                    )
+                    predicted_classes[specialist_candidate_mask] = specialist_main_class_ids - 1
+                    predicted_probs[specialist_candidate_mask] = specialist_probs
+                except Exception as exc:
+                    _emit_status(
+                        status_callback,
+                        f"Warning: specialist post-processing was skipped ({exc})",
+                    )
+        predicted_classes, ndwi_water_mask = apply_pre_smoothing_post_classification_rules(
+            predicted_classes,
+            ndwi_values,
+        )
+        if ndwi_water_mask.any():
+            _emit_status(
+                status_callback,
+                f"Reclassified {int(ndwi_water_mask.sum()):,} positive-NDWI pixel(s) to Class 8 before patch smoothing",
+            )
+        if apply_salt_pepper_cleanup:
+            valid_mask_grid = valid_mask.unstack("pixel").values.astype(bool, copy=False)
+            predicted_class_grid = numpy.full(valid_mask_grid.shape, -1, dtype=numpy.int16)
+            predicted_class_grid[valid_mask_grid] = predicted_classes
+            cleaned_class_grid, cleaned_mask_grid = remove_small_class_patches(
+                predicted_class_grid,
+                valid_mask_grid,
+            )
+            if cleaned_mask_grid.any():
+                cleaned_pixel_count = int(cleaned_mask_grid.sum())
+                _emit_status(
+                    status_callback,
+                    f"Smoothed salt-and-pepper noise across {cleaned_pixel_count:,} small-patch pixel(s)",
+                )
+                _emit_progress(progress_callback, 0.82)
+                predicted_classes = cleaned_class_grid[valid_mask_grid].astype(numpy.int16, copy=False)
         predicted_classes, reclassified_mask = apply_post_classification_rules(
             predicted_classes,
             ndvi_values,
@@ -1901,6 +2110,8 @@ def classify_s2_scene(
     debug=False,
     status_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[float], None] | None = None,
+    apply_secondary_models: bool = True,
+    apply_salt_pepper_cleanup: bool = True,
 ):
     """
     Function to classify an S2 scene netCDF file
@@ -1908,6 +2119,11 @@ def classify_s2_scene(
     """
     ui_callback_mode = status_callback is not None or progress_callback is not None
     verbose_console = debug or not ui_callback_mode
+
+    if is_class45_specialist_model_path(saved_model):
+        raise ValueError(
+            "The Class 4/5 specialist model is a post-processing helper and cannot be used as the primary Apply model."
+        )
 
     model_path = os.path.abspath(saved_model)
     cached_entry = _MODEL_CACHE.get(model_path)
@@ -1926,7 +2142,6 @@ def classify_s2_scene(
     detected_model_family_label = str(model_metadata["model_family_label"])
     detected_feature_mode = str(model_metadata["feature_mode"])
     detected_feature_mode_label = str(model_metadata["feature_mode_label"])
-    required_raw_bands = RAW_BANDS_BY_MODE[detected_feature_mode]
     _emit_status(
         status_callback,
         f"Detected model method: {detected_model_family_label}",
@@ -1943,6 +2158,69 @@ def classify_s2_scene(
                 f"{spectral_cnn_sequence_input_label(model_metadata.get('sequence_use_standardized_reflectance'))}"
             ),
         )
+    specialist_model = None
+    specialist_model_metadata: dict[str, object] | None = None
+    if apply_secondary_models:
+        specialist_model_path = resolve_class45_specialist_model_path(saved_model)
+        if specialist_model_path is not None:
+            _emit_status(
+                status_callback,
+                f"Loading specialist model from {specialist_model_path.name}",
+            )
+            try:
+                specialist_model = _load_cached_learner(
+                    str(specialist_model_path),
+                    status_callback=status_callback,
+                )
+                specialist_model_metadata = extract_class45_specialist_metadata(specialist_model)
+                if specialist_model_metadata is None:
+                    specialist_model = None
+                    _emit_status(
+                        status_callback,
+                        "Warning: the specialist model metadata is invalid; specialist refinement will be skipped",
+                    )
+                else:
+                    _emit_status(
+                        status_callback,
+                        (
+                            "Detected specialist post-processor: "
+                            f"{specialist_model_metadata['specialist_display_name']}"
+                        ),
+                    )
+                    _emit_status(
+                        status_callback,
+                        (
+                            "Detected specialist features: "
+                            f"{specialist_model_metadata['specialist_feature_profile_label']}"
+                        ),
+                    )
+            except Exception as exc:
+                specialist_model = None
+                specialist_model_metadata = None
+                _emit_status(
+                    status_callback,
+                    f"Warning: could not load the specialist model ({exc}); continuing without it",
+                )
+        else:
+            _emit_status(
+                status_callback,
+                "No Class 4/5 specialist model was found next to the selected model; continuing without it",
+            )
+    required_raw_bands = tuple(
+        dict.fromkeys(
+            [
+                *RAW_BANDS_BY_MODE[detected_feature_mode],
+                *(
+                    [
+                        str(band_name)
+                        for band_name in specialist_model_metadata.get("specialist_raw_bands", SPECIALIST_RAW_BANDS)
+                    ]
+                    if isinstance(specialist_model_metadata, dict)
+                    else []
+                ),
+            ]
+        )
+    )
 
     # Keep the extracted zip contents alive for the full workflow.
     with _prepare_s2_scene_input(input_s2_safe, status_callback) as resolved_scene_path:
@@ -1997,6 +2275,9 @@ def classify_s2_scene(
                 s2_data,
                 class_model,
                 model_metadata,
+                specialist_model=specialist_model,
+                specialist_model_metadata=specialist_model_metadata,
+                apply_salt_pepper_cleanup=apply_salt_pepper_cleanup,
                 status_callback=status_callback,
                 progress_callback=progress_callback,
             )

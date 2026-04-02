@@ -10,6 +10,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 from fastai.tabular.all import load_learner
 
@@ -21,6 +22,12 @@ from ice_creams_model_families import (
     predict_model_probabilities,
     prepare_sequence_feature_dataframe,
     spectral_cnn_sequence_input_label,
+)
+from ice_creams_specialist_models import (
+    extract_class45_specialist_metadata,
+    predict_class45_specialist,
+    prepare_class45_specialist_feature_dataframe,
+    resolve_class45_specialist_model_path,
 )
 
 
@@ -523,6 +530,9 @@ def validate_model(
 
     _emit_status(status_callback, f"Loading model: {model_file.name}")
     learner = load_learner(str(model_file))
+    selected_specialist_metadata = extract_class45_specialist_metadata(learner)
+    specialist_model = None
+    specialist_model_metadata: dict[str, Any] | None = None
     model_metadata = extract_model_metadata(learner)
     detected_model_family = str(model_metadata["model_family"])
     detected_model_family_label = str(model_metadata["model_family_label"])
@@ -545,10 +555,73 @@ def validate_model(
                 f"{spectral_cnn_sequence_input_label(model_metadata.get('sequence_use_standardized_reflectance'))}"
             ),
         )
+    if selected_specialist_metadata is not None:
+        _emit_status(
+            status_callback,
+            (
+                "Detected specialist post-processor model: "
+                f"{selected_specialist_metadata['specialist_display_name']}"
+            ),
+        )
+        _emit_status(
+            status_callback,
+            (
+                "Detected specialist features: "
+                f"{selected_specialist_metadata['specialist_feature_profile_label']}"
+            ),
+        )
+    else:
+        specialist_model_path = resolve_class45_specialist_model_path(model_file)
+        if specialist_model_path is not None:
+            try:
+                _emit_status(
+                    status_callback,
+                    f"Loading specialist model: {specialist_model_path.name}",
+                )
+                specialist_model = load_learner(str(specialist_model_path))
+                specialist_model_metadata = extract_class45_specialist_metadata(specialist_model)
+                if specialist_model_metadata is None:
+                    specialist_model = None
+                    _emit_status(
+                        status_callback,
+                        "Warning: the specialist model metadata is invalid; validation will use main-model outputs only",
+                    )
+                else:
+                    _emit_status(
+                        status_callback,
+                        (
+                            "Detected specialist post-processor: "
+                            f"{specialist_model_metadata['specialist_display_name']}"
+                        ),
+                    )
+                    _emit_status(
+                        status_callback,
+                        (
+                            "Detected specialist features: "
+                            f"{specialist_model_metadata['specialist_feature_profile_label']}"
+                        ),
+                    )
+            except Exception as exc:
+                specialist_model = None
+                specialist_model_metadata = None
+                _emit_status(
+                    status_callback,
+                    f"Warning: could not load the specialist model ({exc}); validation will use main-model outputs only",
+                )
+        else:
+            _emit_status(
+                status_callback,
+                "No Class 4/5 specialist model was found next to the selected model; validation will use main-model outputs only",
+            )
     _emit_progress(progress_callback, 0.32)
 
     _emit_status(status_callback, "Checking required feature columns")
-    if detected_model_family == "spectral_1d_cnn":
+    if selected_specialist_metadata is not None:
+        validation_model_df = prepare_class45_specialist_feature_dataframe(
+            validation_df,
+            context="Validation dataset",
+        )
+    elif detected_model_family == "spectral_1d_cnn":
         validation_model_df = prepare_sequence_feature_dataframe(
             validation_df,
             feature_mode=detected_feature_mode,
@@ -583,6 +656,41 @@ def validate_model(
         str(vocab[class_idx]) if 0 <= class_idx < len(vocab) else str(class_idx)
         for class_idx in class_indices
     ]
+    specialist_applied = False
+    if specialist_model is not None and specialist_model_metadata is not None:
+        specialist_candidate_mask = np.asarray(
+            [
+                _match_concept(raw_label) in {"magnoliopsida", "microphytobenthos"}
+                for raw_label in predicted_classes_raw
+            ],
+            dtype=bool,
+        )
+        if bool(specialist_candidate_mask.any()):
+            _emit_status(
+                status_callback,
+                (
+                    "Refining "
+                    f"{int(specialist_candidate_mask.sum()):,} Class 4/5 validation prediction(s) "
+                    "with the specialist model"
+                ),
+            )
+            try:
+                _, specialist_confidences, specialist_labels = predict_class45_specialist(
+                    validation_df.loc[specialist_candidate_mask].reset_index(drop=True),
+                    specialist_model,
+                    specialist_model_metadata,
+                    batch_size=batch_size,
+                )
+                candidate_positions = np.flatnonzero(specialist_candidate_mask)
+                for candidate_offset, specialist_label in zip(candidate_positions, specialist_labels):
+                    predicted_classes_raw[int(candidate_offset)] = specialist_label
+                confidence_values[candidate_positions] = specialist_confidences
+                specialist_applied = True
+            except Exception as exc:
+                _emit_status(
+                    status_callback,
+                    f"Warning: specialist validation refinement was skipped ({exc})",
+                )
     predicted_classes = [
         _map_label_to_validation_space(
             raw_label=raw_label,
@@ -707,6 +815,13 @@ def validate_model(
             model_metadata.get("sequence_use_standardized_reflectance", False)
         ),
         "sequence_input_label": str(model_metadata.get("sequence_input_label") or ""),
+        "specialist_applied": bool(specialist_applied),
+        "specialist_display_name": str(
+            (
+                specialist_model_metadata or selected_specialist_metadata or {}
+            ).get("specialist_display_name")
+            or ""
+        ),
     }
 
 

@@ -16,7 +16,7 @@ The desktop application is distributed from the hosted UI repository: [SigOiry/I
 
 To install the app:
 
-- download the Windows installer directly here: [`ICE_CREAMS_Installer_1_0_23.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_23.exe)
+- download the Windows installer directly here: [`ICE_CREAMS_Installer_1_0_24.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_24.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu after installation
 
@@ -24,13 +24,13 @@ For end users, the packaged desktop app is the recommended entry point. A separa
 
 Patch notes for the current desktop release are available in [`PATCHNOTES.md`](PATCHNOTES.md).
 
-## What's New in 1.0.23
+## What's New in 1.0.24
 
-- Added an optional **Spectral 1D CNN** training path alongside the legacy tabular dense network
-- Spectral 1D CNN training can now include either raw reflectance only or raw plus standardized reflectance as saved model metadata
-- Apply and Validation now auto-detect the exported model family, feature mode, and spectral input layout
-- Added post-processing to reclassify output **Class 4** pixels with `NDVI < 0.25` to **Class 5**, with `SPC` forced to `-1`
-- Packaged desktop build and installer have been refreshed for version `1.0.23`
+- Added post-processing to reclassify any positive-`NDWI` pixel to output **Class 8** before smoothing and `SPC` computation
+- Added an Apply-tab option to smooth small salt-and-pepper patches for a more ecologically coherent final map
+- Optimized small-patch smoothing with connected-component labeling for faster apply performance
+- Removed the unfinished secondary specialist-model toggle from the Apply tab while keeping that backend path disabled in the desktop UI
+- Packaged desktop build and installer have been refreshed for version `1.0.24`
 
 ## Current App Features
 

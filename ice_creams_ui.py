@@ -54,6 +54,7 @@ from ice_creams_model_families import (
     model_family_label,
     spectral_cnn_sequence_input_label,
 )
+from ice_creams_specialist_models import is_class45_specialist_model_path
 
 # Keep terminal output clean on current Flet versions.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -65,7 +66,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.23"
+APP_VERSION = "1.0.24"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -658,7 +659,11 @@ def main(page: ft.Page) -> None:
     about_assets_dir = PROJECT_ROOT / "about"
     about_icons_dir = PROJECT_ROOT / "icons"
     existing_models = (
-        sorted(default_models_dir.rglob("*.pkl"))
+        [
+            model_path
+            for model_path in sorted(default_models_dir.rglob("*.pkl"))
+            if not is_class45_specialist_model_path(model_path)
+        ]
         if default_models_dir.exists()
         else []
     )
@@ -1013,6 +1018,13 @@ def main(page: ft.Page) -> None:
         text_size=14,
         height=56,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
+    )
+    apply_salt_pepper_cleanup_checkbox = ft.Checkbox(
+        value=True,
+        label="Smooth small salt-and-pepper patches",
+        active_color=LIQUID_ACCENT,
+        check_color=ft.Colors.WHITE,
+        label_style=ft.TextStyle(size=13, color=LIQUID_TEXT, weight=ft.FontWeight.W_500),
     )
 
     apply_output_preview = ft.Text(
@@ -1758,7 +1770,11 @@ def main(page: ft.Page) -> None:
         nonlocal existing_models, default_apply_model
 
         existing_models = (
-            sorted(default_models_dir.rglob("*.pkl"))
+            [
+                model_path
+                for model_path in sorted(default_models_dir.rglob("*.pkl"))
+                if not is_class45_specialist_model_path(model_path)
+            ]
             if default_models_dir.exists()
             else []
         )
@@ -4457,6 +4473,17 @@ def main(page: ft.Page) -> None:
         push_apply_status(f"Model selected: {Path(selected_model).name}")
         schedule_apply_preflight_scan("Checking already processed outputs for the selected model.")
 
+    def on_apply_salt_pepper_cleanup_toggle(_: ft.ControlEvent) -> None:
+        salt_pepper_cleanup_enabled = bool(apply_salt_pepper_cleanup_checkbox.value)
+        push_apply_status(
+            (
+                "Small-patch salt-and-pepper smoothing enabled for Apply runs."
+                if salt_pepper_cleanup_enabled
+                else "Salt-and-pepper smoothing disabled. Raw model classes will be kept."
+            )
+        )
+        request_ui_refresh()
+
     async def choose_training_dataset(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
@@ -4838,9 +4865,18 @@ def main(page: ft.Page) -> None:
         archive_warnings: list[str] = []
         single_scene_replacement_input = {"value": None}
         total_scenes = len(scene_inputs)
+        salt_pepper_cleanup_enabled = bool(apply_salt_pepper_cleanup_checkbox.value)
         detected_model_family_label = {"value": ""}
         detected_feature_mode_label = {"value": ""}
         detected_sequence_input_label = {"value": ""}
+        salt_pepper_cleanup_label = "Enabled" if salt_pepper_cleanup_enabled else "Disabled"
+        push_apply_status(
+            (
+                "Small-patch salt-and-pepper smoothing is enabled for this run."
+                if salt_pepper_cleanup_enabled
+                else "Small-patch salt-and-pepper smoothing is disabled for this run."
+            )
+        )
 
         def _is_current_apply_run(run_token: int = apply_run_token) -> bool:
             return (
@@ -5050,6 +5086,8 @@ def main(page: ft.Page) -> None:
                         False,
                         schedule_apply_status,
                         schedule_apply_progress,
+                        apply_secondary_models=False,
+                        apply_salt_pepper_cleanup=salt_pepper_cleanup_enabled,
                     )
                 except Exception as exc:  # noqa: BLE001 - continue processing the next scene.
                     failed_scene_records.append((scene_input, str(exc)))
@@ -5114,6 +5152,7 @@ def main(page: ft.Page) -> None:
                 if detected_sequence_input_label["value"]
                 else ""
             )
+            salt_pepper_cleanup_suffix = f" Salt-and-pepper cleanup: {salt_pepper_cleanup_label}."
             apply_progress.value = 1.0
 
             if failed_count == 0:
@@ -5125,27 +5164,27 @@ def main(page: ft.Page) -> None:
                     )
                     push_apply_status(
                         f"Workflow finished successfully. Output written to {completed_outputs[0]}."
-                        f"{done_suffix}{method_suffix}{mode_suffix}{spectral_input_suffix}"
+                        f"{done_suffix}{method_suffix}{mode_suffix}{spectral_input_suffix}{salt_pepper_cleanup_suffix}"
                     )
                 elif processed_count > 0 and skipped_existing_count == 0:
                     push_apply_status(
                         f"Batch workflow finished successfully. {processed_count} output(s) were written to "
                         f"{output_folder}. {done_moved_count} input(s) moved to Done."
-                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}"
+                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}{salt_pepper_cleanup_suffix}"
                     )
                 elif processed_count > 0:
                     push_apply_status(
                         f"Apply workflow completed. {processed_count} output(s) written, "
                         f"{skipped_existing_count} already processed scene(s) detected, and "
                         f"{done_moved_count} input(s) moved to Done."
-                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}"
+                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}{salt_pepper_cleanup_suffix}"
                     )
                 elif skipped_existing_count > 0:
                     push_apply_status(
                         "No new outputs were written. "
                         f"{skipped_existing_count} scene(s) were already processed and "
                         f"{done_moved_count} input(s) were moved to Done."
-                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}",
+                        f"{method_suffix}{mode_suffix}{spectral_input_suffix}{salt_pepper_cleanup_suffix}",
                     )
                 else:
                     push_apply_status("No scenes were queued for processing.", level="warning")
@@ -5170,7 +5209,7 @@ def main(page: ft.Page) -> None:
                     f"Apply workflow completed with errors. {processed_count} output(s) written, "
                     f"{failed_count} scene(s) failed, {done_moved_count} input(s) moved to Done, and "
                     f"{failed_moved_count} input(s) moved to Failed."
-                    f"{method_suffix}{mode_suffix}{spectral_input_suffix}"
+                    f"{method_suffix}{mode_suffix}{spectral_input_suffix}{salt_pepper_cleanup_suffix}"
                 )
                 push_apply_status(summary_message, level="error")
                 update_overlay(
@@ -5225,6 +5264,7 @@ def main(page: ft.Page) -> None:
                     f"model_family={detected_model_family_label['value'] or '-'}; "
                     f"feature_mode={detected_feature_mode_label['value'] or '-'}; "
                     f"spectral_inputs={detected_sequence_input_label['value'] or '-'}; "
+                    f"salt_pepper_cleanup={salt_pepper_cleanup_label}; "
                     f"Scenes={selected_scene_count}; queued={total_scenes}; processed={processed_count}; "
                     f"skipped_existing={skipped_existing_count}; failed={failed_count}; "
                     f"moved_done={done_moved_count}; moved_failed={failed_moved_count}; "
@@ -5697,6 +5737,7 @@ def main(page: ft.Page) -> None:
         apply_mask_button,
         apply_output_folder_button,
         apply_model_dropdown,
+        apply_salt_pepper_cleanup_checkbox,
         apply_run_button,
         train_source_button,
         train_source_folder_button,
@@ -5720,6 +5761,7 @@ def main(page: ft.Page) -> None:
         history_refresh_button,
     ]
     apply_model_dropdown.on_select = on_apply_model_select
+    apply_salt_pepper_cleanup_checkbox.on_change = on_apply_salt_pepper_cleanup_toggle
     validation_model_dropdown.on_select = on_validation_model_select
     validation_label_column_field.on_submit = on_validation_label_column_change
     validation_mode_dropdown.on_select = on_validation_mode_select
@@ -5925,8 +5967,9 @@ def main(page: ft.Page) -> None:
                     color=LIQUID_TEXT,
                 ),
                 apply_model_dropdown,
+                apply_salt_pepper_cleanup_checkbox,
                 ft.Text(
-                    "Choose a model from the models folder.",
+                    "Choose a model from the models folder. Leave the checkbox on to smooth small salt-and-pepper patches in post-processing.",
                     size=11,
                     color=LIQUID_MUTED,
                 ),

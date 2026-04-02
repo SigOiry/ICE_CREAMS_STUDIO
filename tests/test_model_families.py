@@ -7,7 +7,12 @@ import pandas as pd
 import torch
 import xarray as xr
 
-from apply_ICECREAMS import apply_classification
+from apply_ICECREAMS import (
+    MODEL_CLASS_INDEX_8,
+    apply_classification,
+    apply_pre_smoothing_post_classification_rules,
+    remove_small_class_patches,
+)
 from ice_creams_feature_modes import (
     FEATURE_COLUMNS_BY_MODE,
     FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
@@ -30,6 +35,87 @@ from ice_creams_model_families import (
 
 
 class ModelFamilyHelperTests(unittest.TestCase):
+    def test_apply_pre_smoothing_post_classification_rules_reclassifies_positive_ndwi_to_class8(self) -> None:
+        predicted_classes = np.asarray([1, 3, 4], dtype=np.int16)
+        ndwi_values = np.asarray([-0.1, 0.2, 0.0], dtype=np.float32)
+
+        updated_classes, water_mask = apply_pre_smoothing_post_classification_rules(
+            predicted_classes,
+            ndwi_values,
+        )
+
+        np.testing.assert_array_equal(
+            updated_classes,
+            np.asarray([1, MODEL_CLASS_INDEX_8, 4], dtype=np.int16),
+        )
+        np.testing.assert_array_equal(
+            water_mask,
+            np.asarray([False, True, False], dtype=bool),
+        )
+
+    def test_remove_small_class_patches_relabels_unique_singletons(self) -> None:
+        class_grid = np.asarray(
+            [
+                [1, 1, 1],
+                [1, 3, 1],
+                [1, 1, 1],
+            ],
+            dtype=np.int16,
+        )
+        valid_mask = np.ones_like(class_grid, dtype=bool)
+
+        updated_grid, cleaned_mask = remove_small_class_patches(class_grid, valid_mask)
+
+        expected_grid = np.asarray(
+            [
+                [1, 1, 1],
+                [1, 1, 1],
+                [1, 1, 1],
+            ],
+            dtype=np.int16,
+        )
+        np.testing.assert_array_equal(updated_grid, expected_grid)
+        self.assertTrue(bool(cleaned_mask[1, 1]))
+        self.assertEqual(int(cleaned_mask.sum()), 1)
+
+    def test_remove_small_class_patches_relabels_two_by_two_clusters(self) -> None:
+        class_grid = np.asarray(
+            [
+                [1, 1, 1, 1, 1],
+                [1, 3, 3, 1, 1],
+                [1, 3, 3, 1, 1],
+                [1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1],
+            ],
+            dtype=np.int16,
+        )
+        valid_mask = np.ones_like(class_grid, dtype=bool)
+
+        updated_grid, cleaned_mask = remove_small_class_patches(class_grid, valid_mask)
+
+        expected_grid = np.ones_like(class_grid, dtype=np.int16)
+        np.testing.assert_array_equal(updated_grid, expected_grid)
+        self.assertEqual(int(cleaned_mask.sum()), 4)
+
+    def test_remove_small_class_patches_keeps_larger_patches(self) -> None:
+        class_grid = np.asarray(
+            [
+                [1, 1, 1, 1, 1, 1],
+                [1, 3, 3, 3, 3, 1],
+                [1, 3, 3, 3, 3, 1],
+                [1, 3, 3, 3, 3, 1],
+                [1, 3, 3, 3, 3, 1],
+                [1, 1, 1, 1, 1, 1],
+            ],
+            dtype=np.int16,
+        )
+        valid_mask = np.ones_like(class_grid, dtype=bool)
+
+        updated_grid, cleaned_mask = remove_small_class_patches(class_grid, valid_mask)
+
+        np.testing.assert_array_equal(updated_grid, class_grid)
+        self.assertFalse(bool(cleaned_mask.any()))
+
     def test_sequence_channel_feature_names_can_disable_standardized_reflectance(self) -> None:
         raw_only_channel_groups = sequence_channel_feature_names_for_mode(
             FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
@@ -369,6 +455,132 @@ class ModelFamilyHelperTests(unittest.TestCase):
             self.assertEqual(int(out_class[0, 0, 1]), 4)
             self.assertEqual(float(seagrass_cover[0, 0, 0]), -1.0)
             self.assertEqual(float(seagrass_cover[0, 0, 1]), 55.0)
+        finally:
+            output_ds.close()
+
+    def test_apply_classification_salt_pepper_cleanup_runs_before_spc_masking(self) -> None:
+        coords = {
+            "band": [1],
+            "y": [30.0, 20.0, 10.0],
+            "x": [100.0, 110.0, 120.0],
+        }
+        base_grid = np.asarray(
+            [
+                [0.1, 0.2, 0.3],
+                [0.2, 0.3, 0.4],
+                [0.3, 0.4, 0.5],
+            ],
+            dtype=np.float32,
+        )
+        input_ds = xr.Dataset(
+            {
+                raw_column_name("B02"): xr.DataArray(base_grid[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                raw_column_name("B03"): xr.DataArray((base_grid + 0.1)[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                raw_column_name("B04"): xr.DataArray((base_grid + 0.2)[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                raw_column_name("B08"): xr.DataArray((base_grid + 0.5)[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                "NDVI": xr.DataArray(np.full((1, 3, 3), 0.40, dtype=np.float32), dims=("band", "y", "x"), coords=coords),
+                "NDWI": xr.DataArray(np.full((1, 3, 3), -0.25, dtype=np.float32), dims=("band", "y", "x"), coords=coords),
+                "SPC": xr.DataArray(np.full((1, 3, 3), 55.0, dtype=np.float32), dims=("band", "y", "x"), coords=coords),
+            }
+        )
+        model_metadata = {
+            "model_family": MODEL_FAMILY_TABULAR_DENSE,
+            "feature_mode": FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
+            "required_feature_names": list(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPATIAL_ACCURACY]),
+        }
+        predicted_probabilities = torch.tensor(
+            [
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.01, 0.01, 0.90, 0.07],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+            ],
+            dtype=torch.float32,
+        )
+
+        with patch("apply_ICECREAMS.predict_model_probabilities", return_value=predicted_probabilities):
+            output_ds = apply_classification(
+                input_ds,
+                class_model=SimpleNamespace(),
+                model_metadata=model_metadata,
+                apply_salt_pepper_cleanup=True,
+                batch_size=9,
+            )
+        try:
+            out_class = output_ds["Out_Class"].values.astype(np.int16)
+            seagrass_cover = output_ds["Seagrass_Cover"].values.astype(np.float32)
+
+            self.assertEqual(int(out_class[0, 1, 1]), 2)
+            self.assertEqual(float(seagrass_cover[0, 1, 1]), -1.0)
+        finally:
+            output_ds.close()
+
+    def test_apply_classification_ndwi_water_reclassification_runs_before_patch_smoothing(self) -> None:
+        coords = {
+            "band": [1],
+            "y": [30.0, 20.0, 10.0],
+            "x": [100.0, 110.0, 120.0],
+        }
+        base_grid = np.asarray(
+            [
+                [0.1, 0.2, 0.3],
+                [0.2, 0.3, 0.4],
+                [0.3, 0.4, 0.5],
+            ],
+            dtype=np.float32,
+        )
+        ndwi_grid = np.full((1, 3, 3), -0.20, dtype=np.float32)
+        ndwi_grid[0, 1, 1] = 0.15
+        input_ds = xr.Dataset(
+            {
+                raw_column_name("B02"): xr.DataArray(base_grid[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                raw_column_name("B03"): xr.DataArray((base_grid + 0.1)[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                raw_column_name("B04"): xr.DataArray((base_grid + 0.2)[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                raw_column_name("B08"): xr.DataArray((base_grid + 0.5)[np.newaxis, :, :], dims=("band", "y", "x"), coords=coords),
+                "NDVI": xr.DataArray(np.full((1, 3, 3), 0.40, dtype=np.float32), dims=("band", "y", "x"), coords=coords),
+                "NDWI": xr.DataArray(ndwi_grid, dims=("band", "y", "x"), coords=coords),
+                "SPC": xr.DataArray(np.full((1, 3, 3), 55.0, dtype=np.float32), dims=("band", "y", "x"), coords=coords),
+            }
+        )
+        model_metadata = {
+            "model_family": MODEL_FAMILY_TABULAR_DENSE,
+            "feature_mode": FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
+            "required_feature_names": list(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPATIAL_ACCURACY]),
+        }
+        predicted_probabilities = torch.tensor(
+            [
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.01, 0.01, 0.90, 0.07],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+                [0.01, 0.90, 0.01, 0.04, 0.04],
+            ],
+            dtype=torch.float32,
+        )
+
+        with patch("apply_ICECREAMS.predict_model_probabilities", return_value=predicted_probabilities):
+            output_ds = apply_classification(
+                input_ds,
+                class_model=SimpleNamespace(),
+                model_metadata=model_metadata,
+                apply_salt_pepper_cleanup=True,
+                batch_size=9,
+            )
+        try:
+            out_class = output_ds["Out_Class"].values.astype(np.int16)
+            seagrass_cover = output_ds["Seagrass_Cover"].values.astype(np.float32)
+
+            self.assertEqual(int(out_class[0, 1, 1]), 2)
+            self.assertEqual(float(seagrass_cover[0, 1, 1]), -1.0)
         finally:
             output_ds.close()
 
