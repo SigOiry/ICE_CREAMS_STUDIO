@@ -16,5 +16,10 @@ dependencies:
   - pip=26.0.1
   - pip:
       - chardet==5.2.0
+      - fastapi==0.122.0
       - flet[all]==0.82.2
       - flet-map==0.82.2
+      - h5netcdf==1.8.1
+      - h5py==3.16.0
+      - netCDF4==1.7.4
+      - uvicorn[standard]==0.38.0

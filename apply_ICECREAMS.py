@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-Apply ICE CREAMS to masked Sentinel-2 or 12-band TIFF imagery.
+Apply ICE CREAMS to masked Sentinel-2, ACOLITE NetCDF, or 12-band TIFF imagery.
 
 Takes a trained Neural Network model (saved with pickle) and runs this over a
-Sentinel-2 SAFE scene, a zipped SAFE scene, or a multi-band GeoTIFF using xarray.
+Sentinel-2 SAFE scene, a zipped SAFE scene, an ACOLITE NetCDF scene, or a
+multi-band GeoTIFF using xarray.
 
 Author: Bede Ffinian Rowe Davies 
 Date: 2023-03-30 edited 2025-09-08
@@ -169,12 +170,14 @@ from fastai.tabular.all import load_learner
 from scipy import ndimage
 
 from ice_creams_feature_modes import (
+    FEATURE_MODE_GENERIC_RASTER,
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
     RAW_BANDS_BY_MODE,
     SPECTRAL_RAW_BANDS,
     prepare_feature_dataframe,
     raw_column_name,
 )
+from ice_creams_generic_raster import classify_generic_raster
 from ice_creams_model_families import (
     extract_model_metadata,
     predict_model_probabilities,
@@ -245,7 +248,28 @@ S2_RAW_BAND_FILE_PATTERNS: dict[str, str] = {
 }
 S2_NATIVE_10M_BANDS = {"B02", "B03", "B04", "B08"}
 MULTIBAND_TIFF_SUFFIXES = {".tif", ".tiff"}
+ACOLITE_NETCDF_SUFFIX = ".nc"
 TIFF_RAW_BAND_ORDER = SPECTRAL_RAW_BANDS
+ACOLITE_BAND_VARIABLES: dict[str, str] = {
+    "B01": "rhos_442",
+    "B02": "rhos_492",
+    "B03": "rhos_559",
+    "B04": "rhos_665",
+    "B05": "rhos_704",
+    "B06": "rhos_739",
+    "B07": "rhos_780",
+    "B08": "rhos_833",
+    "B8A": "rhos_864",
+    "B11": "rhos_1610",
+    "B12": "rhos_2186",
+}
+ACOLITE_BAND_WAVELENGTHS: dict[str, int] = {
+    band_name: int(variable_name.split("_", maxsplit=1)[1])
+    for band_name, variable_name in ACOLITE_BAND_VARIABLES.items()
+}
+ACOLITE_RECOGNIZED_FILE_TYPES = {"L2W", "L2R"}
+ACOLITE_REFLECTANCE_SCALE_FACTOR = numpy.float32(10000.0)
+ACOLITE_WAVELENGTH_TOLERANCE_NM = 20
 
 
 # Substrings (lower-case) that identify integrated or software-renderer adapters.
@@ -568,6 +592,71 @@ def _close_xarray_resources(resources: list[object]) -> None:
                 continue
 
 
+def _with_spatial_crs(
+    dataset: xarray.Dataset,
+    crs_value,
+) -> xarray.Dataset:
+    """Attach x/y spatial dims plus CRS metadata to an xarray dataset."""
+    dataset = dataset.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
+    return dataset.rio.write_crs(crs_value, inplace=False)
+
+
+def _extract_acolite_reflectance_wavelength(variable_name: str) -> int | None:
+    """Return the wavelength suffix from an ACOLITE reflectance variable name."""
+    match = re.fullmatch(r"rhos_(\d+)", str(variable_name).strip(), flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _resolve_acolite_band_variables(
+    acolite_dataset: xarray.Dataset,
+    required_bands: tuple[str, ...] | list[str] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve ACOLITE reflectance variables by nearest wavelength for each S2 band."""
+    ordered_bands = tuple(dict.fromkeys(required_bands or tuple(ACOLITE_BAND_WAVELENGTHS)))
+    available_reflectance_vars = [
+        (variable_name, wavelength_nm)
+        for variable_name in acolite_dataset.data_vars
+        if (wavelength_nm := _extract_acolite_reflectance_wavelength(variable_name)) is not None
+    ]
+
+    resolved_variables: dict[str, str] = {}
+    unresolved_bands: list[str] = []
+    used_variable_names: set[str] = set()
+
+    for band_name in ordered_bands:
+        target_wavelength_nm = ACOLITE_BAND_WAVELENGTHS.get(band_name)
+        if target_wavelength_nm is None:
+            unresolved_bands.append(band_name)
+            continue
+
+        preferred_variable_name = ACOLITE_BAND_VARIABLES.get(band_name)
+        if preferred_variable_name in acolite_dataset.data_vars and preferred_variable_name not in used_variable_names:
+            resolved_variables[band_name] = preferred_variable_name
+            used_variable_names.add(preferred_variable_name)
+            continue
+
+        candidate_matches = sorted(
+            (
+                (abs(wavelength_nm - target_wavelength_nm), variable_name)
+                for variable_name, wavelength_nm in available_reflectance_vars
+                if variable_name not in used_variable_names
+                and abs(wavelength_nm - target_wavelength_nm) <= ACOLITE_WAVELENGTH_TOLERANCE_NM
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        if not candidate_matches:
+            unresolved_bands.append(band_name)
+            continue
+
+        _, selected_variable_name = candidate_matches[0]
+        resolved_variables[band_name] = selected_variable_name
+        used_variable_names.add(selected_variable_name)
+
+    return resolved_variables, unresolved_bands
+
+
 def _open_s2_band(
     raster_path: str,
     clip_bounds: tuple[float, float, float, float] | None = None,
@@ -780,6 +869,8 @@ def _strip_scene_suffixes(scene_name: str) -> str:
     normalized_name = scene_name.strip()
     if normalized_name.lower().endswith(".zip"):
         normalized_name = normalized_name[:-4]
+    if normalized_name.lower().endswith(ACOLITE_NETCDF_SUFFIX):
+        normalized_name = normalized_name[:-len(ACOLITE_NETCDF_SUFFIX)]
     if normalized_name.lower().endswith(".tiff"):
         normalized_name = normalized_name[:-5]
     elif normalized_name.lower().endswith(".tif"):
@@ -945,14 +1036,70 @@ def _is_zip_scene_path(path_value: Path, *, allow_filename_hint: bool = False) -
 
 
 def _is_multiband_tiff_path(path_value: Path) -> bool:
-    """Return True when the path points to a 12-band TIFF input image."""
+    """Return True when the path points to a readable TIFF input image."""
     if not (path_value.is_file() and path_value.suffix.lower() in MULTIBAND_TIFF_SUFFIXES):
         return False
     try:
         with rasterio.open(path_value) as raster:
-            return int(raster.count) == len(TIFF_RAW_BAND_ORDER)
+            return int(raster.count) >= 1
     except Exception:
         return False
+
+
+def _is_acolite_netcdf_path(path_value: Path) -> bool:
+    """Return True when the path points to an ACOLITE NetCDF scene."""
+    if not (path_value.is_file() and path_value.suffix.lower() == ACOLITE_NETCDF_SUFFIX):
+        return False
+    try:
+        with _open_acolite_dataset(path_value, decode_coords="all") as dataset:
+            if "x" not in dataset.coords or "y" not in dataset.coords:
+                return False
+
+            generated_by = str(dataset.attrs.get("generated_by", "")).strip().upper()
+            file_type = str(dataset.attrs.get("acolite_file_type", "")).strip().upper()
+            sensor_name = str(dataset.attrs.get("sensor", "")).strip().upper()
+            resolved_band_variables, _ = _resolve_acolite_band_variables(dataset)
+            recognized_variable_count = len(resolved_band_variables)
+
+            return bool(
+                (
+                    generated_by == "ACOLITE"
+                    or file_type in ACOLITE_RECOGNIZED_FILE_TYPES
+                    or sensor_name.startswith("S2")
+                )
+                and recognized_variable_count >= 8
+            )
+    except Exception:
+        return False
+
+
+def _open_acolite_dataset(
+    input_netcdf_path: str | Path,
+    *,
+    decode_coords: str = "all",
+    chunks: dict[str, int] | None = None,
+) -> xarray.Dataset:
+    """Open an ACOLITE NetCDF dataset using explicit backend fallbacks."""
+    candidate_kwargs = []
+    if chunks:
+        candidate_kwargs.append({"decode_coords": decode_coords, "chunks": chunks})
+        candidate_kwargs.append({"engine": "netcdf4", "decode_coords": decode_coords, "chunks": chunks})
+        candidate_kwargs.append({"engine": "h5netcdf", "decode_coords": decode_coords, "chunks": chunks})
+    candidate_kwargs.append({"decode_coords": decode_coords})
+    candidate_kwargs.append({"engine": "netcdf4", "decode_coords": decode_coords})
+    candidate_kwargs.append({"engine": "h5netcdf", "decode_coords": decode_coords})
+
+    last_error: Exception | None = None
+    for open_kwargs in candidate_kwargs:
+        try:
+            return xarray.open_dataset(input_netcdf_path, **open_kwargs)
+        except Exception as exc:
+            last_error = exc
+
+    raise ValueError(
+        "Could not open the ACOLITE NetCDF file with the available backends. "
+        f"Last error: {last_error}"
+    )
 
 
 def _derive_scene_id(scene_path: Path) -> str:
@@ -968,19 +1115,32 @@ def _derive_scene_id(scene_path: Path) -> str:
 def _extract_scene_acquisition_datetime(scene_id: str) -> str | None:
     """Extract acquisition timestamp from a Sentinel-2 scene identifier."""
     match = re.search(r"(\d{8}T\d{6})", scene_id)
-    if not match:
-        return None
-    try:
-        acquisition_dt = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S")
-    except ValueError:
-        return None
-    return acquisition_dt.strftime("%Y-%m-%d %H:%M:%S")
+    if match:
+        try:
+            acquisition_dt = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S")
+        except ValueError:
+            acquisition_dt = None
+        if acquisition_dt is not None:
+            return acquisition_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    acolite_match = re.search(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2})", scene_id)
+    if acolite_match:
+        try:
+            acquisition_dt = datetime.strptime(acolite_match.group(1), "%Y_%m_%d_%H_%M_%S")
+        except ValueError:
+            acquisition_dt = None
+        if acquisition_dt is not None:
+            return acquisition_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    return None
 
 
 def _scene_format(scene_path: Path) -> str:
     """Return normalized scene format label for UI/backend reporting."""
     if scene_path.suffix.lower() == ".zip":
         return "ZIP"
+    if _is_acolite_netcdf_path(scene_path):
+        return "ACOLITE"
     if _is_multiband_tiff_path(scene_path):
         return "TIFF"
     return "SAFE" if _is_safe_directory_path(scene_path) else "ZIP"
@@ -1007,7 +1167,7 @@ def _build_scene_record(
 
 def _select_preferred_scene(candidates: list[dict[str, str | None]]) -> dict[str, str | None]:
     """Select the preferred candidate when the same scene exists as SAFE and ZIP."""
-    format_priority = {"SAFE": 0, "TIFF": 1, "ZIP": 2}
+    format_priority = {"SAFE": 0, "ACOLITE": 1, "TIFF": 2, "ZIP": 3}
     return sorted(
         candidates,
         key=lambda item: (
@@ -1022,14 +1182,20 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
     Discover scene inputs and return metadata, including duplicate resolution.
 
     Duplicate scenes are grouped by scene identifier. When multiple formats are
-    available, SAFE is preferred over TIFF, and TIFF is preferred over ZIP.
+    available, SAFE is preferred over ACOLITE, ACOLITE is preferred over TIFF,
+    and TIFF is preferred over ZIP.
     """
     input_path = Path(input_scene_path)
     cached_batch_info = _get_cached_scene_batch_info(input_path)
     if cached_batch_info is not None:
         return cached_batch_info
 
-    if _is_safe_directory_path(input_path) or _is_zip_scene_path(input_path) or _is_multiband_tiff_path(input_path):
+    if (
+        _is_safe_directory_path(input_path)
+        or _is_zip_scene_path(input_path)
+        or _is_multiband_tiff_path(input_path)
+        or _is_acolite_netcdf_path(input_path)
+    ):
         selected = [_build_scene_record(input_path)]
         return _store_scene_batch_info(input_path, {
             "input_path": str(input_path),
@@ -1043,11 +1209,12 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
             "duplicate_groups": [],
             "format_counts": {
                 "SAFE": int(selected[0]["format"] == "SAFE"),
+                "ACOLITE": int(selected[0]["format"] == "ACOLITE"),
                 "TIFF": int(selected[0]["format"] == "TIFF"),
                 "ZIP": int(selected[0]["format"] == "ZIP"),
             },
             "acquisition_dates": [selected[0]["acquisition_date"]] if selected[0]["acquisition_date"] else [],
-            "selection_rule": "Prefer .SAFE over .tif/.tiff over .zip when duplicate scenes are found.",
+            "selection_rule": "Prefer .SAFE over .nc over .tif/.tiff over .zip when duplicate scenes are found.",
         })
 
     if input_path.is_dir() and input_path.name.upper().endswith(".SAFE"):
@@ -1062,12 +1229,17 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
 
     if input_path.is_file() and input_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
         raise FileNotFoundError(
-            "Selected TIFF input must contain exactly 12 spectral bands."
+            "Selected TIFF input must contain at least one readable band."
+        )
+
+    if input_path.is_file() and input_path.suffix.lower() == ACOLITE_NETCDF_SUFFIX:
+        raise FileNotFoundError(
+            "Selected NetCDF input is not a supported ACOLITE scene."
         )
 
     if not input_path.is_dir():
         raise FileNotFoundError(
-            "Input scene must be a .SAFE directory, a .zip archive, a 12-band .tif/.tiff image, or a folder containing them."
+            "Input scene must be a .SAFE directory, a .zip archive, an ACOLITE .nc image, a multiband .tif/.tiff image, or a folder containing them."
         )
 
     discovered_records: list[dict[str, str | None]] = []
@@ -1124,15 +1296,28 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
                     )
                 else:
                     ignored_candidates.append(str(file_path))
+                continue
+
+            if file_path.suffix.lower() == ACOLITE_NETCDF_SUFFIX:
+                if _is_acolite_netcdf_path(file_path):
+                    discovered_records.append(
+                        _build_scene_record(
+                            file_path,
+                            scene_id=_strip_scene_suffixes(file_path.name),
+                            format_label="ACOLITE",
+                        )
+                    )
+                else:
+                    ignored_candidates.append(str(file_path))
 
     if not discovered_records:
         if ignored_candidates:
             raise FileNotFoundError(
                 f"No valid apply inputs were found in {input_scene_path}. "
-                f"Ignored {len(ignored_candidates)} unsupported .SAFE/.zip/.tif/.tiff candidate(s)."
+                f"Ignored {len(ignored_candidates)} unsupported .SAFE/.zip/.nc/.tif/.tiff candidate(s)."
             )
         raise FileNotFoundError(
-            f"No .SAFE folders, .zip archives, or 12-band .tif/.tiff files were found in {input_scene_path}"
+            f"No .SAFE folders, .zip archives, ACOLITE .nc files, or multiband .tif/.tiff files were found in {input_scene_path}"
         )
 
     grouped_records: dict[str, list[dict[str, str | None]]] = {}
@@ -1162,7 +1347,7 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
             str(item["scene_id"]).upper(),
         ),
     )
-    format_counts = {"SAFE": 0, "TIFF": 0, "ZIP": 0}
+    format_counts = {"SAFE": 0, "ACOLITE": 0, "TIFF": 0, "ZIP": 0}
     for record in selected_records:
         format_counts[str(record["format"])] += 1
 
@@ -1186,7 +1371,7 @@ def discover_scene_batch_info(input_scene_path: str) -> dict[str, object]:
         "duplicate_groups": duplicate_groups,
         "format_counts": format_counts,
         "acquisition_dates": acquisition_dates,
-        "selection_rule": "Prefer .SAFE over .tif/.tiff over .zip when duplicate inputs are found. Ignore unsupported .SAFE/.zip/.tif/.tiff files.",
+        "selection_rule": "Prefer .SAFE over .nc over .tif/.tiff over .zip when duplicate inputs are found. Ignore unsupported .SAFE/.zip/.nc/.tif/.tiff files.",
     })
 
 
@@ -1257,7 +1442,7 @@ def _prepare_s2_scene_input(
     input_scene_path: str,
     status_callback: Callable[[str], None] | None = None,
 ):
-    """Accept a .SAFE folder, zipped SAFE scene, or 12-band TIFF input."""
+    """Accept a .SAFE folder, zipped SAFE scene, ACOLITE .nc, or TIFF input."""
     input_path = Path(input_scene_path)
 
     if input_path.is_dir():
@@ -1305,13 +1490,21 @@ def _prepare_s2_scene_input(
     if input_path.is_file() and input_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
         if not _is_multiband_tiff_path(input_path):
             raise ValueError(
-                "Input TIFF must contain exactly 12 spectral bands."
+                "Input TIFF must contain at least one readable band."
+            )
+        yield str(input_path)
+        return
+
+    if input_path.is_file() and input_path.suffix.lower() == ACOLITE_NETCDF_SUFFIX:
+        if not _is_acolite_netcdf_path(input_path):
+            raise ValueError(
+                "Input NetCDF file is not a supported ACOLITE scene."
             )
         yield str(input_path)
         return
 
     raise FileNotFoundError(
-        "Input scene must be a .SAFE directory, a .zip archive containing one, or a 12-band .tif/.tiff image."
+        "Input scene must be a .SAFE directory, a .zip archive containing one, an ACOLITE .nc image, or a multiband .tif/.tiff image."
     )
 
 
@@ -1527,8 +1720,7 @@ def _read_s2_data_xarray(
         }
         dataset_vars["SCL"] = scl_10m
         s2_data_raw = xarray.Dataset(dataset_vars)
-        # Set CRS
-        s2_data_raw.rio.write_crs(b02.rio.crs)
+        s2_data_raw = _with_spatial_crs(s2_data_raw, b02.rio.crs)
 
         # Apply SCL mask to data
         scl_mask = build_s2_mask_scl_mask(scl_10m)
@@ -1549,6 +1741,7 @@ def _read_s2_data_xarray(
                 coords=s2_data_raw.coords,
             )
 
+        s2_data_raw = _with_spatial_crs(s2_data_raw, b02.rio.crs)
         s2_data_raw.set_close(lambda: _close_xarray_resources(opened_raster_resources))
         return s2_data_raw
     except Exception:
@@ -1577,6 +1770,202 @@ def read_s2_safe(
         verbose_console=verbose_console,
         status_callback=status_callback,
     )
+
+
+def _open_acolite_netcdf(
+    input_netcdf_path: str,
+    clip_bounds: tuple[float, float, float, float] | None = None,
+    cleanup_resources: list[object] | None = None,
+) -> xarray.Dataset:
+    """Open one ACOLITE NetCDF dataset and optionally crop it to buffered mask bounds."""
+    acolite_data = _open_acolite_dataset(
+        input_netcdf_path,
+        chunks={"x": 512, "y": 512},
+    )
+    if cleanup_resources is not None:
+        cleanup_resources.append(acolite_data)
+
+    projection_key = str(acolite_data.attrs.get("projection_key", "")).strip()
+    projection_var = None
+    if projection_key:
+        if projection_key in acolite_data.coords:
+            projection_var = acolite_data.coords[projection_key]
+        elif projection_key in acolite_data.data_vars:
+            projection_var = acolite_data[projection_key]
+
+    crs_value = None
+    try:
+        crs_value = acolite_data.rio.crs
+    except Exception:
+        crs_value = None
+    if crs_value is None and projection_var is not None:
+        crs_value = projection_var.attrs.get("crs_wkt")
+    if crs_value is None:
+        raise ValueError("ACOLITE NetCDF input has no readable CRS information.")
+
+    acolite_data = acolite_data.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
+    if cleanup_resources is not None:
+        cleanup_resources.append(acolite_data)
+    acolite_data = acolite_data.rio.write_crs(crs_value, inplace=False)
+    if cleanup_resources is not None:
+        cleanup_resources.append(acolite_data)
+
+    if clip_bounds is None:
+        return acolite_data
+
+    clipped_data = _clip_xarray_to_bounds(acolite_data, clip_bounds)
+    if cleanup_resources is not None:
+        cleanup_resources.append(clipped_data)
+    if clipped_data.sizes.get("x", 0) == 0 or clipped_data.sizes.get("y", 0) == 0:
+        raise ValueError(
+            "Buffered mask extent produced an empty ACOLITE crop. "
+            f"Requested crop extent: {_format_bounds(clip_bounds)}."
+        )
+    return clipped_data
+
+
+def read_acolite_netcdf(
+    input_netcdf_path: str,
+    mask_vector_file=None,
+    verbose_console: bool = True,
+    status_callback: Callable[[str], None] | None = None,
+    required_raw_bands: tuple[str, ...] | list[str] | None = None,
+):
+    """Read an ACOLITE NetCDF image and return a Dataset of raw reflectance bands."""
+    clip_bounds: tuple[float, float, float, float] | None = None
+    mask_vector: geopandas.GeoDataFrame | None = None
+    opened_raster_resources: list[object] = []
+    ordered_raw_bands = tuple(
+        dict.fromkeys(required_raw_bands or tuple(ACOLITE_BAND_WAVELENGTHS))
+    )
+    unsupported_bands = [band_name for band_name in ordered_raw_bands if band_name not in ACOLITE_BAND_WAVELENGTHS]
+    if unsupported_bands:
+        unsupported_preview = ", ".join(unsupported_bands)
+        if any(band_name in {"B09", "B10"} for band_name in unsupported_bands):
+            raise ValueError(
+                "ACOLITE input does not provide reflectance for Sentinel-2 bands B09 or B10. "
+                f"The selected model still requires: {unsupported_preview}. "
+                "Train and use an ACOLITE-specific model that excludes B09 to apply this format."
+            )
+        raise ValueError(
+            f"ACOLITE input does not provide the required Sentinel-2 raw band(s): {unsupported_preview}."
+        )
+
+    try:
+        acolite_data = _open_acolite_netcdf(
+            input_netcdf_path,
+            cleanup_resources=opened_raster_resources,
+        )
+        resolved_band_variables, missing_required_bands = _resolve_acolite_band_variables(
+            acolite_data,
+            ordered_raw_bands,
+        )
+        if missing_required_bands:
+            missing_preview = ", ".join(missing_required_bands)
+            available_reflectance_variables = sorted(
+                variable_name
+                for variable_name in acolite_data.data_vars
+                if _extract_acolite_reflectance_wavelength(variable_name) is not None
+            )
+            available_preview = ", ".join(available_reflectance_variables[:12])
+            available_suffix = (
+                f", +{len(available_reflectance_variables) - 12} more"
+                if len(available_reflectance_variables) > 12
+                else ""
+            )
+            raise ValueError(
+                "ACOLITE input does not provide resolvable reflectance variables for the required "
+                f"Sentinel-2 band(s): {missing_preview}. "
+                f"Available ACOLITE reflectance variables: {available_preview}{available_suffix}."
+            )
+
+        reference_band = (
+            acolite_data[resolved_band_variables["B02"]]
+            .expand_dims(dim={"band": [1]})
+            .transpose("band", "y", "x")
+        )
+
+        if mask_vector_file is not None:
+            _emit_status(status_callback, f"Opening mask polygon (m1) from {mask_vector_file}")
+            _console_log(f"Masking ACOLITE raster to {mask_vector_file}", verbose_console)
+            mask_vector = geopandas.read_file(mask_vector_file)
+            mask_vector = _align_mask_vector_to_scene(
+                mask_vector,
+                mask_vector_file,
+                reference_band,
+                verbose_console=verbose_console,
+            )
+
+            mask_bounds = tuple(float(value) for value in mask_vector.total_bounds)
+            scene_bounds = tuple(float(value) for value in reference_band.rio.bounds(recalc=True))
+            clip_bounds = _bounds_intersection(
+                _expand_bounds(
+                    mask_bounds,
+                    MASK_EXTENT_BUFFER_DISTANCE,
+                    MASK_EXTENT_BUFFER_DISTANCE,
+                ),
+                scene_bounds,
+            )
+            if clip_bounds is None:
+                raise ValueError(
+                    "Buffered mask extent does not intersect the ACOLITE raster extent. "
+                    f"Mask extent: {_format_bounds(mask_bounds)}. "
+                    f"Raster extent: {_format_bounds(scene_bounds)}."
+                )
+
+            _emit_status(
+                status_callback,
+                f"Applying buffered extent mask (m2) with {int(MASK_EXTENT_BUFFER_DISTANCE)} m padding",
+            )
+            acolite_data = _open_acolite_netcdf(
+                input_netcdf_path,
+                clip_bounds=clip_bounds,
+                cleanup_resources=opened_raster_resources,
+            )
+
+        _emit_status(status_callback, "Using ACOLITE input grid directly (no spatial resampling)")
+        _emit_status(
+            status_callback,
+            "Scaling ACOLITE reflectance from 0-1 to the 0-10000 training-data range",
+        )
+        dataset_vars: dict[str, xarray.DataArray] = {}
+        for band_name in ordered_raw_bands:
+            source_var_name = resolved_band_variables[band_name]
+            scaled_reflectance = (
+                acolite_data[source_var_name].astype(numpy.float32)
+                * ACOLITE_REFLECTANCE_SCALE_FACTOR
+            )
+            dataset_vars[raw_column_name(band_name)] = (
+                scaled_reflectance
+                .expand_dims(dim={"band": [1]})
+                .transpose("band", "y", "x")
+            )
+
+        raster_data = xarray.Dataset(dataset_vars)
+        raster_data = _with_spatial_crs(raster_data, acolite_data.rio.crs)
+
+        if mask_vector is not None:
+            _emit_status(status_callback, "Applying original mask polygon (m1) to raster pixels")
+            template_var_name = _first_available_raw_reflectance_name(raster_data)
+            mask_raster = rasterio.features.geometry_mask(
+                mask_vector.geometry,
+                out_shape=raster_data[template_var_name].shape[1:],
+                transform=raster_data.rio.transform(recalc=True),
+            )
+            raster_data = raster_data.where(~mask_raster)
+            raster_data["study_site"] = xarray.DataArray(
+                data=numpy.expand_dims(mask_raster, axis=0),
+                dims=raster_data.dims,
+                coords=raster_data.coords,
+            )
+
+        raster_data = _with_spatial_crs(raster_data, acolite_data.rio.crs)
+        _emit_status(status_callback, "No SCL mask is available for ACOLITE input; skipping SCL masking")
+        raster_data.set_close(lambda: _close_xarray_resources(opened_raster_resources))
+        return raster_data
+    except Exception:
+        _close_xarray_resources(opened_raster_resources)
+        raise
 
 
 def read_multiband_tiff(
@@ -1661,7 +2050,7 @@ def read_multiband_tiff(
             )
 
         raster_data = xarray.Dataset(dataset_vars)
-        raster_data.rio.write_crs(raster_stack.rio.crs)
+        raster_data = _with_spatial_crs(raster_data, raster_stack.rio.crs)
 
         if mask_vector is not None:
             _emit_status(status_callback, "Applying original mask polygon (m1) to raster pixels")
@@ -1678,6 +2067,7 @@ def read_multiband_tiff(
                 coords=raster_data.coords,
             )
 
+        raster_data = _with_spatial_crs(raster_data, raster_stack.rio.crs)
         _emit_status(status_callback, "No SCL mask is available for TIFF input; skipping SCL masking")
         raster_data.set_close(lambda: _close_xarray_resources(opened_raster_resources))
         return raster_data
@@ -2099,7 +2489,16 @@ def apply_classification(
 
     # Drop the lazy dask NDVI from input_xarray before merging so the eager
     # numpy-backed NDVI in output_vars takes its place with no conflict.
-    return xarray.merge([input_xarray.drop_vars("NDVI", errors="ignore"), xarray.Dataset(output_vars)])
+    merged_output = xarray.merge(
+        [input_xarray.drop_vars("NDVI", errors="ignore"), xarray.Dataset(output_vars)]
+    )
+    try:
+        input_crs = input_xarray.rio.crs
+    except Exception:
+        input_crs = None
+    if input_crs is not None:
+        merged_output = _with_spatial_crs(merged_output, input_crs)
+    return merged_output
 
 
 def classify_s2_scene(
@@ -2138,6 +2537,14 @@ def classify_s2_scene(
         class_model = _load_cached_learner(saved_model, status_callback=status_callback)
         _emit_progress(progress_callback, 0.12)
     model_metadata = extract_model_metadata(class_model)
+    if model_metadata["feature_mode"] == FEATURE_MODE_GENERIC_RASTER:
+        _emit_status(status_callback, "Detected model feature mode: Generic Multiband Raster")
+        return classify_generic_raster(
+            input_s2_safe, output_gtiff, class_model, model_metadata,
+            mask_polygon_path=mask_vector_file,
+            status_callback=status_callback,
+            progress_callback=progress_callback,
+        )
     detected_model_family = str(model_metadata["model_family"])
     detected_model_family_label = str(model_metadata["model_family_label"])
     detected_feature_mode = str(model_metadata["feature_mode"])
@@ -2232,7 +2639,17 @@ def classify_s2_scene(
             resolved_input_path = Path(resolved_scene_path)
             # Open scene into xarray dataset
             # Specify chunksize so uses dask and doesn't load all data to RAM
-            if resolved_input_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
+            if resolved_input_path.suffix.lower() == ACOLITE_NETCDF_SUFFIX:
+                _emit_status(status_callback, f"Reading ACOLITE NetCDF from {resolved_scene_path}")
+                _console_log(f"Reading in ACOLITE NetCDF from {resolved_scene_path}...", verbose_console)
+                s2_data_raw = read_acolite_netcdf(
+                    resolved_scene_path,
+                    mask_vector_file,
+                    verbose_console=verbose_console,
+                    status_callback=status_callback,
+                    required_raw_bands=required_raw_bands,
+                )
+            elif resolved_input_path.suffix.lower() in MULTIBAND_TIFF_SUFFIXES:
                 _emit_status(status_callback, f"Reading multi-band TIFF from {resolved_scene_path}")
                 _console_log(f"Reading in TIFF data from {resolved_scene_path}...", verbose_console)
                 s2_data_raw = read_multiband_tiff(
@@ -2266,6 +2683,7 @@ def classify_s2_scene(
 
             # Merge to a single xarray
             s2_data = xarray.merge([s2_data_raw, ndwi_raw, ndvi_true_raw, spc_raw])
+            s2_data = _with_spatial_crs(s2_data, s2_data_raw.rio.crs)
 
             # Apply classification. Will print progress
             _emit_status(status_callback, "Applying the ICE CREAMS model")
@@ -2298,7 +2716,7 @@ def classify_s2_scene(
                     "class_ids": str(CLASSES_NUMBER_ID_DICT),
                 }
             )
-            output_raster = output_raster.rio.write_crs(s2_data.rio.crs)
+            output_raster = _with_spatial_crs(output_raster, s2_data_raw.rio.crs)
 
             ## Write out to Geotiff
             output_dir = os.path.dirname(output_gtiff)
@@ -2355,7 +2773,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "insafe",
-        help="Input .SAFE folder, .zip archive containing a .SAFE scene, or 12-band .tif/.tiff image",
+        help="Input .SAFE folder, .zip archive containing a .SAFE scene, ACOLITE .nc image, or 12-band .tif/.tiff image",
     )
     parser.add_argument("outfile", help="Output file for classification")
     parser.add_argument(

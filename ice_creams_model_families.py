@@ -16,6 +16,7 @@ from torch import nn
 from torch.utils.data import Dataset
 
 from ice_creams_feature_modes import (
+    FEATURE_MODE_GENERIC_RASTER,
     FEATURE_MODE_CHOICES,
     ensure_required_columns,
     extract_learner_required_feature_names,
@@ -78,13 +79,16 @@ def spectral_cnn_uses_standardized_reflectance(
     channel_groups = _normalize_sequence_channel_feature_names(sequence_channel_feature_names)
     if channel_groups:
         return any(
-            feature_name.startswith("Reflectance_Stan_")
+            feature_name.startswith("Reflectance_Stan_") or feature_name.endswith("_Standardized")
             for channel_group in channel_groups
             for feature_name in channel_group
         )
 
     ordered_feature_names = _normalise_name_list(sequence_feature_names)
-    return any(feature_name.startswith("Reflectance_Stan_") for feature_name in ordered_feature_names)
+    return any(
+        feature_name.startswith("Reflectance_Stan_") or feature_name.endswith("_Standardized")
+        for feature_name in ordered_feature_names
+    )
 
 
 def spectral_cnn_sequence_input_label(use_standardized_reflectance: bool | None) -> str:
@@ -405,6 +409,7 @@ def attach_model_metadata(
     sequence_feature_names: Iterable[Any] | None = None,
     sequence_channel_feature_names: Any | None = None,
     sequence_normalization: dict[str, Any] | None = None,
+    raster_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Attach normalized ICE CREAMS model metadata to an exported learner."""
     resolved_model_family = normalize_model_family(model_family)
@@ -422,6 +427,7 @@ def attach_model_metadata(
         "sequence_use_standardized_reflectance": False,
         "sequence_input_label": "",
         "sequence_normalization": {},
+        "raster_schema": raster_schema or {},
     }
 
     if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN:
@@ -552,6 +558,7 @@ def extract_model_metadata(learner: Any) -> dict[str, Any]:
                 )
             ),
             "sequence_normalization": sequence_normalization,
+            "raster_schema": explicit_metadata.get("raster_schema") or {},
         }
 
     required_feature_names = extract_learner_required_feature_names(learner)
@@ -600,7 +607,7 @@ def predict_model_probabilities(
         sequence_feature_names=sequence_feature_names,
         sequence_channel_feature_names=sequence_channel_feature_names,
         context="Model inference",
-    )
+    ) if model_metadata.get("feature_mode") != FEATURE_MODE_GENERIC_RASTER else model_input_frame.loc[:, sequence_feature_names]
     sequence_values = np.stack(
         [
             sequence_df.loc[:, channel_feature_names].to_numpy(dtype=np.float32, copy=True)

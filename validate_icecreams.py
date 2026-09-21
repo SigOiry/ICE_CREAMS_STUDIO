@@ -29,6 +29,9 @@ from ice_creams_specialist_models import (
     prepare_class45_specialist_feature_dataframe,
     resolve_class45_specialist_model_path,
 )
+from ice_creams_labelled_raster import labelled_raster_dataframe
+from ice_creams_generic_raster import labelled_generic_raster_dataframe, prepare_generic_features
+from ice_creams_feature_modes import FEATURE_MODE_GENERIC_RASTER
 
 
 _CONCEPT_DISPLAY: dict[str, str] = {
@@ -283,8 +286,8 @@ def _normalise_dataset_path(dataset_path: str) -> Path:
         raise FileNotFoundError(f"Validation dataset not found: {dataset_path}")
     if not candidate.is_file():
         raise ValueError(f"Validation dataset path must be a file: {dataset_path}")
-    if candidate.suffix.lower() not in {".csv", ".xlsx"}:
-        raise ValueError("Validation dataset must be a .csv or .xlsx file.")
+    if candidate.suffix.lower() not in {".csv", ".xlsx", ".tif", ".tiff"}:
+        raise ValueError("Validation dataset must be a .csv, .xlsx, .tif, or .tiff file.")
     return candidate.resolve()
 
 
@@ -481,6 +484,7 @@ def validate_model(
     progress_callback: Callable[[float], None] | None = None,
     validation_mode: str = VALIDATION_MODE_MULTICLASS,
     target_class: str = DEFAULT_TARGET_CLASS,
+    polygon_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Validate a trained fastai model against a labelled validation dataset.
@@ -501,21 +505,16 @@ def validate_model(
     output_folder = Path(str(output_dir).strip()).expanduser()
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    _emit_status(status_callback, f"Loading validation table: {dataset_file.name}")
-    validation_df = _read_validation_table(dataset_file)
-    _emit_progress(progress_callback, 0.18)
-
-    if label_name not in validation_df.columns:
-        raise ValueError(
-            f"Label column '{label_name}' was not found in validation dataset."
-        )
-
-    _emit_status(status_callback, f"Using label column '{label_name}'")
-    (
-        concept_to_dataset_label,
-        normalized_to_dataset_label,
-        ordered_validation_labels,
-    ) = _build_validation_label_space(validation_df[label_name])
+    is_raster = dataset_file.suffix.lower() in {".tif", ".tiff"}
+    if is_raster != bool(polygon_path):
+        raise ValueError("Raster validation requires both a multiband raster and labelled polygons.")
+    validation_df = None
+    if not is_raster:
+        _emit_status(status_callback, f"Loading validation table: {dataset_file.name}")
+        validation_df = _read_validation_table(dataset_file)
+        if label_name not in validation_df.columns:
+            raise ValueError(f"Label column '{label_name}' was not found in validation dataset.")
+        _emit_progress(progress_callback, 0.18)
     if mode_name == VALIDATION_MODE_PRESENCE_ABSENCE:
         _emit_status(
             status_callback,
@@ -538,6 +537,39 @@ def validate_model(
     detected_model_family_label = str(model_metadata["model_family_label"])
     detected_feature_mode = str(model_metadata["feature_mode"])
     detected_feature_mode_label = str(model_metadata["feature_mode_label"])
+    if is_raster:
+        _emit_status(status_callback, "Extracting labelled validation pixels")
+        if detected_feature_mode == FEATURE_MODE_GENERIC_RASTER:
+            validation_df, _ = labelled_generic_raster_dataframe(
+                str(dataset_file), str(polygon_path), label_name,
+                expected_schema=model_metadata.get("raster_schema"),
+            )
+        else:
+            validation_df = labelled_raster_dataframe(
+                str(dataset_file), str(polygon_path), label_name,
+                feature_mode=detected_feature_mode,
+            )
+        _emit_progress(progress_callback, 0.18)
+    assert validation_df is not None
+    _emit_status(status_callback, f"Using label column '{label_name}'")
+    (
+        concept_to_dataset_label,
+        normalized_to_dataset_label,
+        ordered_validation_labels,
+    ) = _build_validation_label_space(validation_df[label_name])
+    if detected_feature_mode == FEATURE_MODE_GENERIC_RASTER:
+        labels_present = validation_df[label_name].astype("string").str.strip()
+        if labels_present.isna().any() or labels_present.eq("").any():
+            raise ValueError(f"Validation class column '{label_name}' contains missing values.")
+        def map_validation_label(raw_label: Any) -> str:
+            return "<MISSING>" if pd.isna(raw_label) else str(raw_label).strip()
+    else:
+        def map_validation_label(raw_label: Any) -> str:
+            return _map_label_to_validation_space(
+                raw_label=raw_label,
+                concept_to_dataset_label=concept_to_dataset_label,
+                normalized_to_dataset_label=normalized_to_dataset_label,
+            )
     required_features = list(model_metadata["required_feature_names"])
     _emit_status(
         status_callback,
@@ -555,7 +587,7 @@ def validate_model(
                 f"{spectral_cnn_sequence_input_label(model_metadata.get('sequence_use_standardized_reflectance'))}"
             ),
         )
-    if selected_specialist_metadata is not None:
+    if selected_specialist_metadata is not None and detected_feature_mode != FEATURE_MODE_GENERIC_RASTER:
         _emit_status(
             status_callback,
             (
@@ -570,7 +602,7 @@ def validate_model(
                 f"{selected_specialist_metadata['specialist_feature_profile_label']}"
             ),
         )
-    else:
+    elif detected_feature_mode != FEATURE_MODE_GENERIC_RASTER:
         specialist_model_path = resolve_class45_specialist_model_path(model_file)
         if specialist_model_path is not None:
             try:
@@ -616,7 +648,16 @@ def validate_model(
     _emit_progress(progress_callback, 0.32)
 
     _emit_status(status_callback, "Checking required feature columns")
-    if selected_specialist_metadata is not None:
+    if detected_feature_mode == FEATURE_MODE_GENERIC_RASTER:
+        validation_model_df = prepare_generic_features(
+            validation_df,
+            model_metadata["raster_schema"],
+            standardized=(
+                detected_model_family == "spectral_1d_cnn"
+                and bool(model_metadata.get("sequence_use_standardized_reflectance"))
+            ),
+        )
+    elif selected_specialist_metadata is not None:
         validation_model_df = prepare_class45_specialist_feature_dataframe(
             validation_df,
             context="Validation dataset",
@@ -691,29 +732,12 @@ def validate_model(
                     status_callback,
                     f"Warning: specialist validation refinement was skipped ({exc})",
                 )
-    predicted_classes = [
-        _map_label_to_validation_space(
-            raw_label=raw_label,
-            concept_to_dataset_label=concept_to_dataset_label,
-            normalized_to_dataset_label=normalized_to_dataset_label,
-        )
-        for raw_label in predicted_classes_raw
-    ]
-    mapped_true_series = validation_df[label_name].map(
-        lambda raw_label: _map_label_to_validation_space(
-            raw_label=raw_label,
-            concept_to_dataset_label=concept_to_dataset_label,
-            normalized_to_dataset_label=normalized_to_dataset_label,
-        )
-    ).astype("string")
+    predicted_classes = [map_validation_label(raw_label) for raw_label in predicted_classes_raw]
+    mapped_true_series = validation_df[label_name].map(map_validation_label).astype("string")
     predicted_series = pd.Series(predicted_classes, name="Predicted_Class", dtype="string")
 
     if mode_name == VALIDATION_MODE_PRESENCE_ABSENCE:
-        target_class_label = _map_label_to_validation_space(
-            raw_label=target_class_name,
-            concept_to_dataset_label=concept_to_dataset_label,
-            normalized_to_dataset_label=normalized_to_dataset_label,
-        )
+        target_class_label = map_validation_label(target_class_name)
         _emit_status(
             status_callback,
             (
@@ -732,23 +756,12 @@ def validate_model(
         ordered_present_classes = []
         present_seen: set[str] = set()
         for raw_label in ordered_validation_labels:
-            mapped_label = _map_label_to_validation_space(
-                raw_label=raw_label,
-                concept_to_dataset_label=concept_to_dataset_label,
-                normalized_to_dataset_label=normalized_to_dataset_label,
-            )
+            mapped_label = map_validation_label(raw_label)
             if mapped_label != "<MISSING>" and mapped_label not in present_seen:
                 present_seen.add(mapped_label)
                 ordered_present_classes.append(mapped_label)
 
-        class_order_hint = [
-            _map_label_to_validation_space(
-                raw_label=class_name,
-                concept_to_dataset_label=concept_to_dataset_label,
-                normalized_to_dataset_label=normalized_to_dataset_label,
-            )
-            for class_name in vocab
-        ]
+        class_order_hint = [map_validation_label(class_name) for class_name in vocab]
 
     _emit_status(status_callback, "Computing validation metrics")
     metrics_df = _compute_metrics_table(
@@ -827,7 +840,7 @@ def validate_model(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate an ICE CREAMS model")
-    parser.add_argument("dataset_path", help="Validation dataset path (.csv or .xlsx)")
+    parser.add_argument("dataset_path", help="Validation dataset path (.csv, .xlsx, .tif, or .tiff)")
     parser.add_argument("model_path", help="Trained model path (.pkl)")
     parser.add_argument(
         "--label-column",
@@ -849,6 +862,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TARGET_CLASS,
         help="Target class for presence/absence mode (name or numeric class id)",
     )
+    parser.add_argument("--polygons", help="Labelled polygon file for raster validation")
     return parser
 
 
@@ -862,6 +876,7 @@ def _main() -> None:
         status_callback=lambda message: print(message, flush=True),
         validation_mode=args.validation_mode,
         target_class=args.target_class,
+        polygon_path=args.polygons,
     )
     print(f"Predictions CSV: {result['predictions_csv']}")
     print(f"Metrics CSV: {result['metrics_csv']}")

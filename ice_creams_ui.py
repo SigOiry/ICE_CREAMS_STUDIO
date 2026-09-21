@@ -42,8 +42,10 @@ from validate_icecreams import (
 )
 from ice_creams_feature_modes import (
     DEFAULT_FEATURE_MODE,
+    FEATURE_MODE_GENERIC_RASTER,
     FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE,
     feature_mode_label,
     normalize_feature_mode,
 )
@@ -66,7 +68,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.24"
+APP_VERSION = "1.0.25"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -972,7 +974,7 @@ def main(page: ft.Page) -> None:
     )
     apply_mask_field = ft.TextField(
         value="",
-        hint_text="Select a shapefile mask (.shp)",
+        hint_text="Optional polygon mask (.shp, .gpkg, .geojson)",
         read_only=True,
         border_radius=18,
         filled=True,
@@ -1650,6 +1652,14 @@ def main(page: ft.Page) -> None:
                 key=FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
                 text=feature_mode_label(FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY),
             ),
+            ft.dropdown.Option(
+                key=FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE,
+                text=feature_mode_label(FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE),
+            ),
+            ft.dropdown.Option(
+                key=FEATURE_MODE_GENERIC_RASTER,
+                text=feature_mode_label(FEATURE_MODE_GENERIC_RASTER),
+            ),
         ],
         border_radius=18,
         filled=True,
@@ -1705,7 +1715,7 @@ def main(page: ft.Page) -> None:
 
     validation_dataset_field = ft.TextField(
         value="",
-        hint_text="Select a validation dataset (.csv or .xlsx)",
+        hint_text="Select a table or multiband raster (.tif/.tiff)",
         read_only=True,
         border_radius=18,
         filled=True,
@@ -1717,6 +1727,10 @@ def main(page: ft.Page) -> None:
         height=56,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
     )
+    training_raster_field = ft.TextField(label="Training raster", read_only=True)
+    training_polygon_field = ft.TextField(label="Labelled polygons", read_only=True)
+    training_label_field = ft.TextField(label="Polygon class column", value="True_Class")
+    validation_polygon_field = ft.TextField(label="Labelled polygons for raster validation", read_only=True)
     validation_model_dropdown = ft.Dropdown(
         value=str(default_apply_model) if default_apply_model else None,
         options=[
@@ -2143,6 +2157,8 @@ def main(page: ft.Page) -> None:
         scene_name = Path(scene_value).name
         if scene_name.lower().endswith(".zip"):
             scene_name = scene_name[:-4]
+        if scene_name.lower().endswith(".nc"):
+            scene_name = scene_name[:-3]
         if scene_name.lower().endswith(".tiff"):
             scene_name = scene_name[:-5]
         elif scene_name.lower().endswith(".tif"):
@@ -2325,7 +2341,7 @@ def main(page: ft.Page) -> None:
 
     def _training_source_overlay_path() -> str:
         if not selected_training_csvs:
-            return ""
+            return (training_raster_field.value or "").strip()
         if len(selected_training_csvs) == 1:
             return selected_training_csvs[0]
         try:
@@ -2394,7 +2410,6 @@ def main(page: ft.Page) -> None:
             not state["busy"]
             and not bool(apply_preflight_state["running"])
             and bool(apply_safe_field.value.strip())
-            and bool(apply_mask_field.value.strip())
             and bool(apply_output_path_field.value.strip())
             and bool((apply_model_dropdown.value or "").strip())
             and _apply_preflight_matches_current_selection()
@@ -2416,9 +2431,6 @@ def main(page: ft.Page) -> None:
             return
         if not (apply_model_dropdown.value or "").strip():
             apply_run_button.tooltip = "Choose a model."
-            return
-        if not apply_mask_field.value.strip():
-            apply_run_button.tooltip = "Choose a mask shapefile."
             return
         if not _apply_preflight_matches_current_selection():
             apply_run_button.tooltip = "Waiting for the pre-run output check to finish."
@@ -2518,12 +2530,12 @@ def main(page: ft.Page) -> None:
         if duplicate_count > 0:
             push_apply_status(
                 f"Warning: {duplicate_count} duplicate scene(s) detected. "
-                f"{scene_batch_info['skipped_count']} duplicate file(s) will be skipped (SAFE preferred over TIFF preferred over ZIP).",
+                f"{scene_batch_info['skipped_count']} duplicate file(s) will be skipped (SAFE preferred over ACOLITE preferred over TIFF preferred over ZIP).",
                 level="warning",
             )
         if ignored_count > 0:
             push_apply_status(
-                f"Warning: {ignored_count} unsupported .SAFE/.zip/.tif/.tiff item(s) were ignored.",
+                f"Warning: {ignored_count} unsupported .SAFE/.zip/.nc/.tif/.tiff item(s) were ignored.",
                 level="warning",
             )
 
@@ -2860,6 +2872,7 @@ def main(page: ft.Page) -> None:
         )
         format_parts = [
             f"{int(format_counts.get('SAFE', 0))} SAFE",
+            f"{int(format_counts.get('ACOLITE', 0))} ACOLITE",
             f"{int(format_counts.get('TIFF', 0))} TIFF",
             f"{int(format_counts.get('ZIP', 0))} ZIP",
         ]
@@ -2875,11 +2888,11 @@ def main(page: ft.Page) -> None:
         if duplicate_count > 0:
             warning_messages.append(
                 f"{duplicate_count} duplicate scene(s) detected. "
-                f"{batch_info['skipped_count']} duplicate file(s) skipped (SAFE preferred over TIFF preferred over ZIP)."
+                f"{batch_info['skipped_count']} duplicate file(s) skipped (SAFE preferred over ACOLITE preferred over TIFF preferred over ZIP)."
             )
         if ignored_count > 0:
             warning_messages.append(
-                f"{ignored_count} unsupported .SAFE/.zip/.tif/.tiff item(s) ignored."
+                f"{ignored_count} unsupported .SAFE/.zip/.nc/.tif/.tiff item(s) ignored."
             )
 
         if warning_messages:
@@ -4341,18 +4354,18 @@ def main(page: ft.Page) -> None:
         if state["busy"]:
             return
         files = await ft.FilePicker().pick_files(
-            dialog_title="Select a single .zip scene or 12-band .tif/.tiff image",
+            dialog_title="Select a .zip scene, ACOLITE .nc image, or multiband .tif/.tiff image",
             initial_directory=_resolve_initial_directory(apply_safe_field.value),
             file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["zip", "tif", "tiff"],
+            allowed_extensions=["zip", "nc", "tif", "tiff"],
             allow_multiple=False,
         )
         if not files:
             return
 
         selected_path = Path(files[0].path)
-        if selected_path.suffix.lower() not in {".zip", ".tif", ".tiff"}:
-            show_error("apply", "Please select a .zip, .tif, or .tiff input file for this action.")
+        if selected_path.suffix.lower() not in {".zip", ".nc", ".tif", ".tiff"}:
+            show_error("apply", "Please select a .zip, .nc, .tif, or .tiff input file for this action.")
             return
 
         try:
@@ -4372,6 +4385,8 @@ def main(page: ft.Page) -> None:
         hide_batch_popup()
         if selected_path.suffix.lower() == ".zip":
             push_apply_status("Single .zip scene selected.")
+        elif selected_path.suffix.lower() == ".nc":
+            push_apply_status("Single ACOLITE NetCDF input selected.")
         else:
             push_apply_status("Single TIFF input selected.")
         schedule_apply_preflight_scan("Checking already processed outputs for the selected input file.")
@@ -4380,7 +4395,7 @@ def main(page: ft.Page) -> None:
         if state["busy"]:
             return
         selected = await ft.FilePicker().get_directory_path(
-            dialog_title="Select a single .SAFE folder or a batch folder containing .SAFE/.zip/.tif inputs",
+            dialog_title="Select a single .SAFE folder or a batch folder containing .SAFE/.zip/.nc/.tif inputs",
             initial_directory=_resolve_initial_directory(apply_safe_field.value),
         )
         if selected:
@@ -4422,7 +4437,7 @@ def main(page: ft.Page) -> None:
             ignored_count = int(batch_info.get("ignored_count", 0))
             if ignored_count > 0:
                 push_apply_status(
-                    f"Warning: {ignored_count} unsupported .SAFE/.zip/.tif/.tiff item(s) were ignored.",
+                    f"Warning: {ignored_count} unsupported .SAFE/.zip/.nc/.tif/.tiff item(s) were ignored.",
                     level="warning",
                 )
             show_batch_popup(batch_info)
@@ -4432,10 +4447,10 @@ def main(page: ft.Page) -> None:
         if state["busy"]:
             return
         files = await ft.FilePicker().pick_files(
-            dialog_title="Select a shapefile mask",
+            dialog_title="Select an optional polygon mask",
             initial_directory=_resolve_initial_directory(apply_mask_field.value),
             file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["shp"],
+            allowed_extensions=["shp", "gpkg", "geojson", "json"],
             allow_multiple=False,
         )
         if files:
@@ -4443,7 +4458,14 @@ def main(page: ft.Page) -> None:
             refresh_apply_run_button_state()
             if _apply_can_run():
                 set_app_status("ready", "Ready for a new run.")
-            push_apply_status("Mask shapefile selected.")
+            push_apply_status("Polygon mask selected.")
+
+    def clear_mask_file(_: ft.ControlEvent) -> None:
+        if state["busy"]:
+            return
+        apply_mask_field.value = ""
+        refresh_apply_run_button_state()
+        push_apply_status("Polygon mask cleared; the full image will be classified.")
 
     async def choose_output_folder(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4523,6 +4545,33 @@ def main(page: ft.Page) -> None:
             f"{len(selected_training_csv_folders)} folder selection(s)."
         )
 
+    async def choose_training_raster(_: ft.ControlEvent) -> None:
+        if state["busy"]:
+            return
+        files = await ft.FilePicker().pick_files(
+            dialog_title="Select a multiband training raster",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["tif", "tiff"],
+            allow_multiple=False,
+        )
+        if files:
+            training_raster_field.value = str(Path(files[0].path).resolve())
+            training_mode_dropdown.value = FEATURE_MODE_GENERIC_RASTER
+            push_train_status(f"Training raster selected: {Path(files[0].path).name}")
+
+    async def choose_training_polygons(_: ft.ControlEvent) -> None:
+        if state["busy"]:
+            return
+        files = await ft.FilePicker().pick_files(
+            dialog_title="Select labelled training polygons",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["shp", "gpkg", "geojson", "json"],
+            allow_multiple=False,
+        )
+        if files:
+            training_polygon_field.value = str(Path(files[0].path).resolve())
+            push_train_status(f"Training polygons selected: {Path(files[0].path).name}")
+
     async def choose_training_dataset_folder(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
@@ -4562,6 +4611,8 @@ def main(page: ft.Page) -> None:
         selected_training_csv_files.clear()
         selected_training_csv_folders.clear()
         selected_training_csvs.clear()
+        training_raster_field.value = ""
+        training_polygon_field.value = ""
         _update_training_source_field()
         push_train_status("Cleared training dataset selection.")
 
@@ -4583,23 +4634,36 @@ def main(page: ft.Page) -> None:
         if not validation_dataset_field.value.strip() and default_validation_source.exists():
             initial_dir = str(default_validation_source)
         files = await ft.FilePicker().pick_files(
-            dialog_title="Select a validation dataset (.csv or .xlsx)",
+            dialog_title="Select a validation table or multiband raster",
             initial_directory=initial_dir,
             file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["csv", "xlsx"],
+            allowed_extensions=["csv", "xlsx", "tif", "tiff"],
             allow_multiple=False,
         )
         if not files:
             return
 
         selected_path = Path(files[0].path)
-        if selected_path.suffix.lower() not in {".csv", ".xlsx"}:
-            show_error("validation", "Please select a .csv or .xlsx validation dataset.")
+        if selected_path.suffix.lower() not in {".csv", ".xlsx", ".tif", ".tiff"}:
+            show_error("validation", "Please select a .csv, .xlsx, .tif or .tiff validation dataset.")
             return
 
         validation_dataset_field.value = str(selected_path)
         refresh_validation_preview()
         push_validation_status(f"Validation dataset selected: {selected_path.name}")
+
+    async def choose_validation_polygons(_: ft.ControlEvent) -> None:
+        if state["busy"]:
+            return
+        files = await ft.FilePicker().pick_files(
+            dialog_title="Select labelled validation polygons",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["shp", "gpkg", "geojson", "json"],
+            allow_multiple=False,
+        )
+        if files:
+            validation_polygon_field.value = str(Path(files[0].path).resolve())
+            push_validation_status(f"Validation polygons selected: {Path(files[0].path).name}")
 
     async def choose_validation_model_file(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4800,9 +4864,6 @@ def main(page: ft.Page) -> None:
                 "apply",
                 "Choose a single .zip/.tif file, a single .SAFE folder, or a batch folder before running.",
             )
-            return
-        if not apply_mask_field.value.strip():
-            show_error("apply", "Choose a mask shapefile before running.")
             return
         if not apply_output_path_field.value.strip():
             show_error("apply", "Choose an output folder before running.")
@@ -5015,6 +5076,8 @@ def main(page: ft.Page) -> None:
                         return "Extracting zipped Sentinel-2 scene"
                     if message.startswith("Reading Sentinel-2 scene from "):
                         return "Reading Sentinel-2 scene"
+                    if message.startswith("Reading ACOLITE NetCDF from "):
+                        return "Reading ACOLITE NetCDF"
                     if message.startswith("Reading multi-band TIFF from "):
                         return "Reading multi-band TIFF"
                     if message.startswith("Writing Cloud-Optimised GeoTIFF to "):
@@ -5286,11 +5349,14 @@ def main(page: ft.Page) -> None:
     async def run_training(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
-        if not selected_training_csvs:
+        if not selected_training_csvs and not (training_raster_field.value or "").strip():
             show_error(
                 "train",
-                "Choose one or more training CSV files (directly or via selected folders) before training.",
+                "Choose training CSV files or a raster with labelled polygons before training.",
             )
+            return
+        if bool((training_raster_field.value or "").strip()) != bool((training_polygon_field.value or "").strip()):
+            show_error("train", "Choose both a training raster and labelled polygons.")
             return
         if not training_model_name_field.value.strip():
             show_error("train", "Provide a filename for the exported model.")
@@ -5381,6 +5447,9 @@ def main(page: ft.Page) -> None:
                 sequence_use_standardized_reflectance,
                 schedule_train_status,
                 schedule_train_progress,
+                raster_path=(training_raster_field.value or "").strip() or None,
+                polygon_path=(training_polygon_field.value or "").strip() or None,
+                label_column=(training_label_field.value or "").strip(),
             )
             training_result = result
             accuracy = result.get("accuracy")
@@ -5404,7 +5473,8 @@ def main(page: ft.Page) -> None:
             push_train_status(
                 f"Training completed ({trained_model_family_label}, {trained_mode_label}). "
                 f"{spectral_input_text}"
-                f"{result['rows']} rows across {result['csv_files']} CSV files were used."
+                f"{result['rows']} labelled rows were used "
+                f"({result['csv_files']} CSV files, {result.get('raster_files', 0)} raster)."
                 f"{accuracy_text}"
             )
             report_idle("Training completed.")
@@ -5445,7 +5515,7 @@ def main(page: ft.Page) -> None:
             primary_input_path = (
                 selected_training_csvs[0]
                 if selected_training_csvs
-                else (selected_training_csv_folders[0] if selected_training_csv_folders else "")
+                else ((training_raster_field.value or "").strip() or (selected_training_csv_folders[0] if selected_training_csv_folders else ""))
             )
             record_run_history(
                 workflow="train",
@@ -5476,6 +5546,10 @@ def main(page: ft.Page) -> None:
         dataset_path = validation_dataset_field.value.strip()
         if not dataset_path:
             show_error("validation", "Choose a validation dataset before running.")
+            return
+        is_raster_validation = Path(dataset_path).suffix.lower() in {".tif", ".tiff"}
+        if is_raster_validation and not (validation_polygon_field.value or "").strip():
+            show_error("validation", "Choose labelled polygons for the validation raster.")
             return
 
         model_path = resolve_validation_model_path()
@@ -5550,6 +5624,7 @@ def main(page: ft.Page) -> None:
                 progress_callback=schedule_validation_progress,
                 validation_mode=validation_mode,
                 target_class=target_class,
+                polygon_path=(validation_polygon_field.value or "").strip() if is_raster_validation else None,
             )
             validation_result = result
             detected_model_family_label = str(
@@ -5653,6 +5728,7 @@ def main(page: ft.Page) -> None:
         on_click=choose_mask_file,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
     )
+    apply_clear_mask_button = ft.ElevatedButton("Clear Mask", on_click=clear_mask_file)
     apply_output_folder_button = ft.ElevatedButton(
         "Select Output Folder",
         icon=ft.Icons.FOLDER_OPEN,
@@ -5673,6 +5749,8 @@ def main(page: ft.Page) -> None:
         on_click=choose_training_dataset,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
     )
+    train_raster_button = ft.ElevatedButton("Select Raster", on_click=choose_training_raster)
+    train_polygon_button = ft.ElevatedButton("Select Polygons", on_click=choose_training_polygons)
     train_source_folder_button = ft.ElevatedButton(
         "Add Folder",
         icon=ft.Icons.FOLDER_OPEN,
@@ -5698,6 +5776,7 @@ def main(page: ft.Page) -> None:
         on_click=choose_validation_dataset,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
     )
+    validation_polygon_button = ft.ElevatedButton("Select Polygons", on_click=choose_validation_polygons)
     validation_dropdown_model_button = ft.ElevatedButton(
         "Clear External Model",
         icon=ft.Icons.UNDO,
@@ -5735,11 +5814,14 @@ def main(page: ft.Page) -> None:
         apply_single_scene_button,
         apply_scene_folder_button,
         apply_mask_button,
+        apply_clear_mask_button,
         apply_output_folder_button,
         apply_model_dropdown,
         apply_salt_pepper_cleanup_checkbox,
         apply_run_button,
         train_source_button,
+        train_raster_button,
+        train_polygon_button,
         train_source_folder_button,
         train_source_clear_button,
         train_run_button,
@@ -5750,6 +5832,7 @@ def main(page: ft.Page) -> None:
         training_spectral_cnn_checkbox,
         training_sequence_standardization_checkbox,
         validation_dataset_button,
+        validation_polygon_button,
         validation_dropdown_model_button,
         validation_external_model_button,
         validation_output_button,
@@ -5776,17 +5859,17 @@ def main(page: ft.Page) -> None:
         "Apply ICE CREAMS",
         "Run classification with a clear, guided sequence to reduce cognitive load and avoid setup mistakes.",
         [
-            "Select one SAFE/ZIP/TIFF input or a batch folder",
-            "Choose the mask polygon",
+            "Select one SAFE/ZIP/ACOLITE/TIFF input or a batch folder",
+            "Optionally choose a mask polygon",
             "Set output folder and model",
             "Run and monitor progress",
         ],
     )
     train_intro_panel = _workflow_intro_panel(
         "Train a Model",
-        "Build a new model from CSV datasets with a consistent workflow from data selection to export.",
+        "Build a model from CSV data or a multiband raster with labelled polygons.",
         [
-            "Select CSV files and/or folders",
+            "Select CSV files or a raster with labelled polygons",
             "Set output model name",
             "Set method, mode, epochs, and validation split",
             "Train and review final accuracy",
@@ -5851,7 +5934,7 @@ def main(page: ft.Page) -> None:
                                         ],
                                     ),
                                     ft.Text(
-                                        "Single .zip/.tif: use Single File. Single .SAFE or batch folder with .SAFE/.zip/.tif: use SAFE / Batch.",
+                                        "Single .zip/.nc/.tif: use Single File. Single .SAFE or batch folder with .SAFE/.zip/.nc/.tif: use SAFE / Batch.",
                                         size=11,
                                         color=LIQUID_MUTED,
                                     ),
@@ -5874,9 +5957,9 @@ def main(page: ft.Page) -> None:
                                         color=LIQUID_TEXT,
                                     ),
                                     apply_mask_field,
-                                    apply_mask_button,
+                                    ft.Row(wrap=True, spacing=8, controls=[apply_mask_button, apply_clear_mask_button]),
                                     ft.Text(
-                                        "Only pixels inside this polygon mask are classified.",
+                                        "If supplied, only pixels inside this polygon mask are classified.",
                                         size=11,
                                         color=LIQUID_MUTED,
                                     ),
@@ -6050,7 +6133,7 @@ def main(page: ft.Page) -> None:
     )
 
     train_bottom_cards_height = 190
-    train_paths_card_height = 248
+    train_paths_card_height = 570
     train_progress_card_body = ft.Container(
         height=train_bottom_cards_height,
         content=ft.Column(
@@ -6141,9 +6224,14 @@ def main(page: ft.Page) -> None:
                                                 train_source_clear_button,
                                             ],
                                         ),
+                                        training_raster_field,
+                                        train_raster_button,
+                                        training_polygon_field,
+                                        train_polygon_button,
+                                        training_label_field,
                                         ft.Container(expand=True),
                                         ft.Text(
-                                            "Add one or several CSV files and/or one or several folders containing CSV files. All discovered CSV files are merged into one training table.",
+                                            "Add CSVs or select a multiband raster and labelled polygons. The class column may contain names or numbers.",
                                             size=11,
                                             color=LIQUID_MUTED,
                                         ),
@@ -6225,7 +6313,7 @@ def main(page: ft.Page) -> None:
                                                     ),
                                                     training_mode_dropdown,
                                                     ft.Text(
-                                                        "High Spectral Complexity stays the default training workflow.",
+                                                        "Use Generic Multiband Raster for drone and other images with arbitrary bands. Sentinel-2 modes retain their established features.",
                                                         size=11,
                                                         color=LIQUID_MUTED,
                                                     ),
@@ -6441,6 +6529,8 @@ def main(page: ft.Page) -> None:
                                         ),
                                         validation_dataset_field,
                                         validation_dataset_button,
+                                        validation_polygon_field,
+                                        validation_polygon_button,
                                     ],
                                 ),
                             ),
@@ -7619,10 +7709,7 @@ def main(page: ft.Page) -> None:
                 if len(train_paths_panel_ref.content.controls) >= 2:
                     responsive_row = train_paths_panel_ref.content.controls[1]
                     if isinstance(responsive_row, ft.ResponsiveRow):
-                        train_paths_card_height_dynamic = max(
-                            196,
-                            min(232 if compact_layout else 248, int(viewport_height * (0.22 if compact_layout else 0.26))),
-                        )
+                        train_paths_card_height_dynamic = 570
                         for card in responsive_row.controls:
                             if isinstance(card, ft.Container):
                                 card.height = train_paths_card_height_dynamic

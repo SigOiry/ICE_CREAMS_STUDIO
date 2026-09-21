@@ -1,5 +1,23 @@
 # Patch Notes
 
+## Version 1.0.25 - 2026-09-21
+
+### Added
+
+- Added training and validation from a multiband GeoTIFF and labelled polygons with text or numeric classes
+- Added a Generic Multiband Raster mode that learns directly from arbitrary image bands and stores the band schema with the exported model
+- Added application of generic models to compatible GeoTIFFs, with an optional polygon mask and class-label metadata in the output
+
+### Changed
+
+- Apply accepts GeoTIFFs with arbitrary band counts for generic models; Sentinel-2 models retain their required band checks
+- Apply polygon masks are optional and can be cleared in the desktop interface
+
+### Notes
+
+- Generic input rasters need matching band descriptions, or the same band count and order when descriptions are absent
+- The desktop bundle and installer have been rebuilt for version `1.0.25`
+
 ## Version 1.0.24 - 2026-04-02
 
 ### Added

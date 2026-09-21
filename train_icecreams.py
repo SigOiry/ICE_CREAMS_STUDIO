@@ -24,6 +24,7 @@ from fastai.tabular.all import (
 )
 
 from ice_creams_feature_modes import (
+    FEATURE_MODE_GENERIC_RASTER,
     DEFAULT_FEATURE_MODE,
     FEATURE_MODE_CHOICES,
     build_training_dataframe,
@@ -45,6 +46,8 @@ from ice_creams_model_families import (
     spectral_cnn_sequence_input_label,
     sequence_channel_feature_names_for_mode,
 )
+from ice_creams_labelled_raster import labelled_raster_dataframe
+from ice_creams_generic_raster import labelled_generic_raster_dataframe, prepare_generic_features
 
 
 def _emit_status(status_callback: Callable[[str], None] | None, message: str) -> None:
@@ -164,6 +167,9 @@ def train_model(
     spectral_cnn_use_standardized_reflectance: bool = DEFAULT_SPECTRAL_CNN_USE_STANDARDIZED_REFLECTANCE,
     status_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[float], None] | None = None,
+    raster_path: str | None = None,
+    polygon_path: str | None = None,
+    label_column: str = "True_Class",
 ) -> dict[str, Any]:
     """
     Train a fastai tabular learner from ICE CREAMS CSV training data.
@@ -180,6 +186,8 @@ def train_model(
         raise ValueError("Batch size must be at least 1.")
 
     resolved_feature_mode = normalize_feature_mode(feature_mode)
+    if resolved_feature_mode == FEATURE_MODE_GENERIC_RASTER and not (raster_path and polygon_path):
+        raise ValueError("Generic raster training requires a multiband raster and labelled polygons.")
     selected_mode_label = feature_mode_label(resolved_feature_mode)
     resolved_model_family = normalize_model_family(model_family)
     selected_model_family_label = model_family_label(resolved_model_family)
@@ -187,8 +195,16 @@ def train_model(
         spectral_cnn_use_standardized_reflectance
     )
 
-    csv_files = discover_training_csvs(training_source)
-    _emit_status(status_callback, f"Found {len(csv_files)} training CSV files")
+    if bool(raster_path) != bool(polygon_path):
+        raise ValueError("Training from imagery requires both a raster and a polygon file.")
+    default_source = os.path.join("Data", "Input", "Training")
+    csv_files = (
+        discover_training_csvs(training_source)
+        if training_source and (not raster_path or training_source != default_source)
+        else []
+    )
+    if csv_files:
+        _emit_status(status_callback, f"Found {len(csv_files)} training CSV files")
     _emit_status(status_callback, f"Training feature mode: {selected_mode_label}")
     _emit_status(status_callback, f"Training model method: {selected_model_family_label}")
     if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN:
@@ -204,8 +220,24 @@ def train_model(
         frames.append(pd.read_csv(csv_file))
         _emit_progress(progress_callback, 0.04 + (0.31 * (index / len(csv_files))))
 
+    generic_raster_schema: dict[str, Any] | None = None
+    if raster_path and polygon_path:
+        _emit_status(status_callback, "Extracting labelled pixels from raster and polygons")
+        if resolved_feature_mode == FEATURE_MODE_GENERIC_RASTER:
+            raster_frame, generic_raster_schema = labelled_generic_raster_dataframe(
+                raster_path, polygon_path, label_column
+            )
+        else:
+            raster_frame = labelled_raster_dataframe(
+                raster_path, polygon_path, label_column, feature_mode=resolved_feature_mode
+            )
+        frames.append(raster_frame.rename(columns={label_column: "True_Class"}))
+        _emit_progress(progress_callback, 0.35)
+
     _emit_status(status_callback, "Combining training tables")
     df_nn = pd.concat(frames, ignore_index=True).dropna(how="all")
+    if len(df_nn) < 2:
+        raise ValueError("At least two labelled pixels or rows are needed for training.")
     _emit_progress(progress_callback, 0.38)
 
     dep_var = "True_Class"
@@ -215,19 +247,32 @@ def train_model(
     label_series = df_nn[dep_var].astype("string").fillna("").str.strip()
     if label_series.eq("").any():
         raise ValueError("Training data contains missing values in the True_Class column.")
+    if label_series.nunique() < 2:
+        raise ValueError("At least two distinct labelled classes are required for training.")
+    df_nn[dep_var] = label_series
 
     if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN:
         _emit_status(status_callback, f"Preparing {selected_mode_label} spectral sequences")
-        sequence_channel_feature_names = sequence_channel_feature_names_for_mode(
-            resolved_feature_mode,
-            use_standardized_reflectance=spectral_cnn_use_standardized_reflectance,
-        )
-        sequence_frame = prepare_sequence_feature_dataframe(
-            df_nn,
-            feature_mode=resolved_feature_mode,
-            sequence_channel_feature_names=sequence_channel_feature_names,
-            context="Training data",
-        )
+        if generic_raster_schema:
+            raw_names = list(generic_raster_schema["feature_names"])
+            sequence_channel_feature_names = [raw_names]
+            if spectral_cnn_use_standardized_reflectance:
+                sequence_channel_feature_names.append([f"{name}_Standardized" for name in raw_names])
+            sequence_frame = prepare_generic_features(
+                df_nn, generic_raster_schema,
+                standardized=spectral_cnn_use_standardized_reflectance,
+            )
+        else:
+            sequence_channel_feature_names = sequence_channel_feature_names_for_mode(
+                resolved_feature_mode,
+                use_standardized_reflectance=spectral_cnn_use_standardized_reflectance,
+            )
+            sequence_frame = prepare_sequence_feature_dataframe(
+                df_nn,
+                feature_mode=resolved_feature_mode,
+                sequence_channel_feature_names=sequence_channel_feature_names,
+                context="Training data",
+            )
         feature_columns = list(sequence_frame.columns)
         splits = RandomSplitter(valid_pct=valid_pct, seed=seed)(range_of(sequence_frame))
         train_indices, valid_indices = splits
@@ -280,6 +325,7 @@ def train_model(
             sequence_feature_names=feature_columns,
             sequence_channel_feature_names=sequence_channel_feature_names,
             sequence_normalization=sequence_normalization,
+            raster_schema=generic_raster_schema,
         )
         _emit_progress(progress_callback, 0.56)
 
@@ -297,11 +343,16 @@ def train_model(
             learn.remove_cb(progress_cb)
     else:
         _emit_status(status_callback, f"Preparing {selected_mode_label} training features")
-        df_nn, feature_columns, resolved_feature_mode = build_training_dataframe(
-            df_nn,
-            feature_mode=resolved_feature_mode,
-            label_column=dep_var,
-        )
+        if generic_raster_schema:
+            feature_columns = list(generic_raster_schema["feature_names"])
+            prepared = prepare_generic_features(df_nn, generic_raster_schema)
+            df_nn = pd.concat([df_nn[[dep_var]].copy(), prepared], axis=1)
+        else:
+            df_nn, feature_columns, resolved_feature_mode = build_training_dataframe(
+                df_nn,
+                feature_mode=resolved_feature_mode,
+                label_column=dep_var,
+            )
         selected_mode_label = feature_mode_label(resolved_feature_mode)
 
         _emit_status(status_callback, "Preparing fastai tabular data loaders")
@@ -326,6 +377,7 @@ def train_model(
             model_family=resolved_model_family,
             feature_mode=resolved_feature_mode,
             required_feature_names=feature_columns,
+            raster_schema=generic_raster_schema,
         )
         _emit_progress(progress_callback, 0.56)
 
@@ -360,6 +412,7 @@ def train_model(
         "model_path": str(output_path),
         "rows": int(len(df_nn)),
         "csv_files": int(len(csv_files)),
+        "raster_files": int(bool(raster_path)),
         "classes": n_classes,
         "accuracy": accuracy_value,
         "model_family": resolved_model_family,
@@ -419,7 +472,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--feature-mode",
-        choices=FEATURE_MODE_CHOICES,
+        choices=(*FEATURE_MODE_CHOICES, FEATURE_MODE_GENERIC_RASTER),
         default=DEFAULT_FEATURE_MODE,
         help="Training feature mode",
     )
@@ -429,6 +482,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MODEL_FAMILY,
         help="Training model family",
     )
+    parser.add_argument("--raster", help="Multiband GeoTIFF paired with --polygons")
+    parser.add_argument("--polygons", help="Labelled polygon file paired with --raster")
+    parser.add_argument("--label-column", default="True_Class", help="Class attribute in the polygons")
     return parser
 
 
@@ -443,6 +499,9 @@ if __name__ == "__main__":
         seed=args.seed,
         feature_mode=args.feature_mode,
         model_family=args.model_family,
+        raster_path=args.raster,
+        polygon_path=args.polygons,
+        label_column=args.label_column,
         status_callback=print,
     )
     print(f"Validation accuracy: {result['accuracy']}")

@@ -10,13 +10,18 @@ import pandas as pd
 
 FEATURE_MODE_HIGH_SPATIAL_ACCURACY = "high_spatial_accuracy"
 FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY = "high_spectral_complexity"
+FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE = "high_spectral_complexity_acolite"
+FEATURE_MODE_GENERIC_RASTER = "generic_raster"
 DEFAULT_FEATURE_MODE = FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY
 
 FEATURE_MODE_LABELS: dict[str, str] = {
     FEATURE_MODE_HIGH_SPATIAL_ACCURACY: "High Spatial Accuracy",
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY: "High Spectral Complexity",
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE: "High Spectral Complexity (ACOLITE)",
+    FEATURE_MODE_GENERIC_RASTER: "Generic Multiband Raster",
 }
-FEATURE_MODE_CHOICES = tuple(FEATURE_MODE_LABELS)
+# Sentinel-2-only feature lists remain separate from the generic raster mode.
+FEATURE_MODE_CHOICES = tuple(mode for mode in FEATURE_MODE_LABELS if mode != FEATURE_MODE_GENERIC_RASTER)
 
 SPATIAL_RAW_BANDS = ("B02", "B03", "B04", "B08")
 SPECTRAL_RAW_BANDS = (
@@ -30,6 +35,19 @@ SPECTRAL_RAW_BANDS = (
     "B08",
     "B8A",
     "B09",
+    "B11",
+    "B12",
+)
+ACOLITE_SPECTRAL_RAW_BANDS = (
+    "B01",
+    "B02",
+    "B03",
+    "B04",
+    "B05",
+    "B06",
+    "B07",
+    "B08",
+    "B8A",
     "B11",
     "B12",
 )
@@ -49,15 +67,40 @@ _LEGACY_SPECTRAL_MODEL_RAW_BANDS = (
     "B01",
     "B09",
 )
+_ACOLITE_SPECTRAL_MODEL_RAW_BANDS = (
+    "B02",
+    "B03",
+    "B04",
+    "B08",
+    "B05",
+    "B06",
+    "B07",
+    "B11",
+    "B12",
+    "B8A",
+    "B01",
+)
 
 RAW_BANDS_BY_MODE: dict[str, tuple[str, ...]] = {
     FEATURE_MODE_HIGH_SPATIAL_ACCURACY: SPATIAL_RAW_BANDS,
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY: SPECTRAL_RAW_BANDS,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE: ACOLITE_SPECTRAL_RAW_BANDS,
 }
 
 MODEL_RAW_BANDS_BY_MODE: dict[str, tuple[str, ...]] = {
     FEATURE_MODE_HIGH_SPATIAL_ACCURACY: SPATIAL_RAW_BANDS,
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY: _LEGACY_SPECTRAL_MODEL_RAW_BANDS,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE: _ACOLITE_SPECTRAL_MODEL_RAW_BANDS,
+}
+REBUILD_STANDARDISED_BY_MODE: dict[str, bool] = {
+    FEATURE_MODE_HIGH_SPATIAL_ACCURACY: True,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY: False,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE: True,
+}
+REBUILD_INDICES_BY_MODE: dict[str, bool] = {
+    FEATURE_MODE_HIGH_SPATIAL_ACCURACY: True,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY: False,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE: True,
 }
 
 
@@ -170,13 +213,13 @@ def infer_feature_mode_from_feature_names(feature_names: Iterable[Any]) -> str:
     normalized_names = _normalise_feature_name_list(feature_names)
     feature_set = set(normalized_names)
 
-    for mode_name in FEATURE_MODE_CHOICES:
+    for mode_name in FEATURE_COLUMNS_BY_MODE:
         if feature_set == set(FEATURE_COLUMNS_BY_MODE[mode_name]):
             return mode_name
 
-    supported_feature_set = set(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPATIAL_ACCURACY]) | set(
-        FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY]
-    )
+    supported_feature_set: set[str] = set()
+    for mode_name in FEATURE_COLUMNS_BY_MODE:
+        supported_feature_set.update(FEATURE_COLUMNS_BY_MODE[mode_name])
     unsupported_features = [name for name in normalized_names if name not in supported_feature_set]
     if unsupported_features:
         unsupported_preview = ", ".join(unsupported_features[:12])
@@ -318,13 +361,17 @@ def prepare_feature_dataframe(
     working_frame = frame.copy()
     raw_columns_for_mode = RAW_COLUMNS_BY_MODE[resolved_feature_mode]
     if rebuild_standardised is None:
-        rebuild_standardised = resolved_feature_mode == FEATURE_MODE_HIGH_SPATIAL_ACCURACY
+        rebuild_standardised = REBUILD_STANDARDISED_BY_MODE[resolved_feature_mode]
     if rebuild_indices is None:
-        rebuild_indices = resolved_feature_mode == FEATURE_MODE_HIGH_SPATIAL_ACCURACY
+        rebuild_indices = REBUILD_INDICES_BY_MODE[resolved_feature_mode]
     raw_input_context_suffix = (
         "spatial-mode raw inputs"
         if resolved_feature_mode == FEATURE_MODE_HIGH_SPATIAL_ACCURACY
-        else "raw inputs"
+        else (
+            "acolite-mode raw inputs"
+            if resolved_feature_mode == FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE
+            else "raw inputs"
+        )
     )
 
     if rebuild_standardised or rebuild_indices:

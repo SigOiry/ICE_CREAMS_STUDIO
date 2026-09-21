@@ -23,7 +23,7 @@ The desktop application is distributed from the hosted UI repository:
 To install the app:
 
 - download the Windows installer directly here:
-  [`ICE_CREAMS_Installer_1_0_24.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_24.exe)
+  [`ICE_CREAMS_Installer_1_0_25.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_25.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu
   after installation
@@ -35,20 +35,45 @@ application.
 Patch notes for the current desktop release are available in
 [`PATCHNOTES.md`](PATCHNOTES.md).
 
-## What's New in 1.0.24
+## What's New in 1.0.25
 
-- Added post-processing to reclassify any positive-`NDWI` pixel to
-  output **Class 8** before smoothing and `SPC` computation
-- Added an Apply-tab option to smooth small salt-and-pepper patches for
-  a more ecologically coherent final map
-- Optimized small-patch smoothing with connected-component labeling for
-  faster apply performance
-- Removed the unfinished secondary specialist-model toggle from the
-  Apply tab while keeping that backend path disabled in the desktop UI
-- Packaged desktop build and installer have been refreshed for version
-  `1.0.24`
+- Train and validate from a multiband GeoTIFF and labelled polygons
+- Train a Generic Multiband Raster model for drone or other non-Sentinel imagery
+- Apply generic models to compatible rasters with an optional polygon mask
+- Rebuilt the Windows desktop installer for version `1.0.25`
 
 ## Current App Features
+
+### Training and validation from labelled rasters
+
+The Train and Validation tabs accept a multiband GeoTIFF (`.tif` or `.tiff`)
+paired with labelled polygons (`.shp`, `.gpkg`, or `.geojson`). Enter the polygon
+column containing the class; text and numeric values are supported. Training
+can also combine the extracted pixels with selected CSV files. Validation
+continues to accept CSV and XLSX tables.
+
+For drone and other non-Sentinel imagery, choose **Generic Multiband Raster**
+in Training. The model learns directly from every raster band without
+Sentinel-2 band names, NDVI, or NDWI. Its exported `.pkl` stores the band count,
+band descriptions when available, feature order, and class vocabulary. Select
+that model in Apply to classify a compatible GeoTIFF, with an optional polygon
+mask. The output GeoTIFF has class ID and confidence bands, with the ID-to-label
+mapping in its `CLASS_LABELS` metadata. Validation uses the same stored band
+schema with a new raster and labelled polygons. Both tabular and spectral 1D
+CNN methods are supported.
+
+Raster bands can be identified by Sentinel-2 band descriptions. Without band
+descriptions, a 12-band raster must follow B01, B02, B03, B04, B05, B06, B07,
+B08, B8A, B09, B11, B12 order. A raster with exactly the bands required by the
+selected feature mode may also use that mode's band order. Raster and polygons
+must have valid CRS information and overlap. Pixels with nodata or nonfinite
+values in any required band are omitted. Polygon boundaries use pixel centres;
+conflicting classes over the same pixel produce an error. Floating-point
+reflectance in the 0–1 range is scaled to the model's 0–10000 range.
+These Sentinel-2 band and scaling rules apply only to the Sentinel-2 feature
+modes. Generic models preserve the raster's original numeric values. When band
+descriptions are present, compatible images may reorder bands by name; otherwise
+they must use the same band count and order as the training image.
 
 Edit this list as new versions add, remove, or change features.
 

@@ -2,3 +2,10 @@
 .Rhistory
 .RData
 .Ruserdata
+*.pyc
+./.ipynb_checkpoints/*
+./_pycache_/*
+./output/*
+
+# Local source imagery is too large for ordinary Git and is not needed by the app.
+Data/ACOLITE/*.nc

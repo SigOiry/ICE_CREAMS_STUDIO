@@ -6,6 +6,7 @@ from ice_creams_feature_modes import (
     FEATURE_COLUMNS_BY_MODE,
     FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE,
     build_training_dataframe,
     infer_feature_mode_from_feature_names,
     raw_column_name,
@@ -16,6 +17,7 @@ class FeatureModeHelperTests(unittest.TestCase):
     def test_infer_feature_mode_from_required_feature_names(self) -> None:
         spatial_features = list(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPATIAL_ACCURACY])
         spectral_features = list(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY])
+        acolite_features = list(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE])
 
         self.assertEqual(
             infer_feature_mode_from_feature_names(reversed(spatial_features)),
@@ -24,6 +26,10 @@ class FeatureModeHelperTests(unittest.TestCase):
         self.assertEqual(
             infer_feature_mode_from_feature_names(reversed(spectral_features)),
             FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
+        )
+        self.assertEqual(
+            infer_feature_mode_from_feature_names(reversed(acolite_features)),
+            FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE,
         )
 
     def test_spatial_training_preprocessing_rebuilds_four_band_standardization(self) -> None:
@@ -111,6 +117,47 @@ class FeatureModeHelperTests(unittest.TestCase):
         self.assertEqual(feature_columns, spectral_features)
         self.assertNotIn("Ignored_Column", training_df.columns)
         self.assertNotIn("Another_Extra", training_df.columns)
+
+    def test_acolite_training_preprocessing_rebuilds_features_without_b09(self) -> None:
+        source_df = pd.DataFrame(
+            [
+                {
+                    "True_Class": "Sand",
+                    raw_column_name("B01"): 1.0,
+                    raw_column_name("B02"): 2.0,
+                    raw_column_name("B03"): 3.0,
+                    raw_column_name("B04"): 4.0,
+                    raw_column_name("B05"): 5.0,
+                    raw_column_name("B06"): 6.0,
+                    raw_column_name("B07"): 7.0,
+                    raw_column_name("B08"): 8.0,
+                    raw_column_name("B8A"): 9.0,
+                    raw_column_name("B11"): 10.0,
+                    raw_column_name("B12"): 11.0,
+                    "Reflectance_Stan_B02": 999.0,
+                    "NDVI": 999.0,
+                    "NDWI": 999.0,
+                }
+            ]
+        )
+
+        training_df, feature_columns, resolved_mode = build_training_dataframe(
+            source_df,
+            feature_mode=FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE,
+        )
+
+        self.assertEqual(resolved_mode, FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE)
+        self.assertEqual(
+            feature_columns,
+            list(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE]),
+        )
+        self.assertNotIn(raw_column_name("B09"), training_df.columns)
+        self.assertNotIn("Reflectance_Stan_B09", training_df.columns)
+        self.assertAlmostEqual(training_df.loc[0, "Reflectance_Stan_B01"], 0.0)
+        self.assertAlmostEqual(training_df.loc[0, "Reflectance_Stan_B02"], 0.1)
+        self.assertAlmostEqual(training_df.loc[0, "Reflectance_Stan_B12"], 1.0)
+        self.assertAlmostEqual(training_df.loc[0, "NDVI"], 1.0 / 3.0)
+        self.assertAlmostEqual(training_df.loc[0, "NDWI"], -5.0 / 11.0)
 
     def test_spatial_mode_missing_raw_inputs_raise_clear_error(self) -> None:
         source_df = pd.DataFrame(

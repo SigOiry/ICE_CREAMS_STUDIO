@@ -17,6 +17,7 @@ from ice_creams_feature_modes import (
     FEATURE_COLUMNS_BY_MODE,
     FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
     FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY,
+    FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE,
     raw_column_name,
 )
 from ice_creams_model_families import (
@@ -137,6 +138,35 @@ class ModelFamilyHelperTests(unittest.TestCase):
             "Raw Reflectance Only",
         )
         self.assertTrue(DEFAULT_SPECTRAL_CNN_USE_STANDARDIZED_REFLECTANCE)
+
+    def test_acolite_sequence_feature_names_exclude_b09(self) -> None:
+        sequence_channel_feature_names = sequence_channel_feature_names_for_mode(
+            FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE
+        )
+        sequence_feature_names = sequence_feature_names_for_mode(
+            FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY_ACOLITE
+        )
+
+        self.assertEqual(len(sequence_channel_feature_names), 2)
+        self.assertEqual(len(sequence_channel_feature_names[0]), 11)
+        self.assertNotIn(raw_column_name("B09"), sequence_feature_names)
+        self.assertNotIn("Reflectance_Stan_B09", sequence_feature_names)
+        self.assertEqual(
+            sequence_channel_feature_names[0],
+            [
+                raw_column_name("B01"),
+                raw_column_name("B02"),
+                raw_column_name("B03"),
+                raw_column_name("B04"),
+                raw_column_name("B05"),
+                raw_column_name("B06"),
+                raw_column_name("B07"),
+                raw_column_name("B08"),
+                raw_column_name("B8A"),
+                raw_column_name("B11"),
+                raw_column_name("B12"),
+            ],
+        )
 
     def test_extract_model_metadata_infers_legacy_tabular_model(self) -> None:
         spectral_features = list(FEATURE_COLUMNS_BY_MODE[FEATURE_MODE_HIGH_SPECTRAL_COMPLEXITY])
