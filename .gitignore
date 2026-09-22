@@ -6,6 +6,9 @@
 ./.ipynb_checkpoints/*
 ./_pycache_/*
 ./output/*
+./.claude/*
+./pytest_cache/*
+./Rproj.user/*
 
 # Local source imagery is too large for ordinary Git and is not needed by the app.
 Data/ACOLITE/*.nc

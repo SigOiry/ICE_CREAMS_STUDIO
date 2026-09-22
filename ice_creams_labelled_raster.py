@@ -158,3 +158,74 @@ def labelled_raster_dataframe(
     for name in features.columns:
         frame[name] = features[name]
     return frame
+
+
+def labelled_point_raster_dataframe(
+    raster_path: str,
+    point_path: str,
+    label_column: str,
+    *,
+    feature_mode: str,
+    expected_schema: dict | None = None,
+) -> pd.DataFrame:
+    """Sample labelled points from a raster for validation."""
+    from ice_creams_feature_modes import FEATURE_MODE_GENERIC_RASTER
+    from ice_creams_generic_raster import matching_band_indices
+
+    vector = gpd.read_file(point_path)
+    if vector.empty or vector.crs is None or label_column not in vector.columns:
+        raise ValueError("Labelled points need a CRS and the selected class column.")
+    if not vector.geometry.geom_type.isin(["Point", "MultiPoint"]).all():
+        raise ValueError("The validation vector must contain only points or multipoints.")
+    vector = vector.explode(index_parts=False).reset_index(drop=True)
+    labels = vector[label_column].astype("string").str.strip()
+    if labels.isna().any() or labels.eq("").any():
+        raise ValueError(f"Point class column '{label_column}' contains missing values.")
+    mode = normalize_feature_mode(feature_mode)
+    with rasterio.open(raster_path) as raster:
+        if raster.crs is None:
+            raise ValueError("The validation raster has no CRS.")
+        vector = vector.to_crs(raster.crs)
+        if mode == FEATURE_MODE_GENERIC_RASTER:
+            if not expected_schema:
+                raise ValueError("The generic model has no raster band schema.")
+            indices = matching_band_indices(raster, expected_schema)
+            names = list(expected_schema["feature_names"])
+        else:
+            required = RAW_BANDS_BY_MODE[mode]
+            indices = _band_indices(raster, required)
+            names = [raw_column_name(band) for band in required]
+        records = []
+        for label, point in zip(labels.astype(str), vector.geometry):
+            if point is None or point.is_empty:
+                continue
+            row, col = raster.index(point.x, point.y)
+            if not (0 <= row < raster.height and 0 <= col < raster.width):
+                continue
+            pixel = next(raster.sample([(point.x, point.y)], indexes=indices, masked=True))
+            values = np.ma.filled(pixel.astype(np.float32), np.nan)
+            if not np.isfinite(values).all():
+                continue
+            records.append((label, row, col, point.x, point.y, values))
+        if not records:
+            raise ValueError("No labelled points overlap valid raster pixels.")
+        pixel_values = np.stack([record[5] for record in records])
+        if mode != FEATURE_MODE_GENERIC_RASTER and np.issubdtype(np.dtype(raster.dtypes[0]), np.floating) and np.nanmax(pixel_values) <= 1.5:
+            pixel_values *= 10000.0
+    frame = pd.DataFrame({
+        label_column: [record[0] for record in records],
+        "Pixel_Row": [record[1] for record in records],
+        "Pixel_Col": [record[2] for record in records],
+        "Pixel_X": [record[3] for record in records],
+        "Pixel_Y": [record[4] for record in records],
+    })
+    for index, name in enumerate(names):
+        frame[name] = pixel_values[:, index]
+    if mode != FEATURE_MODE_GENERIC_RASTER:
+        features = prepare_feature_dataframe(
+            frame, feature_mode=mode, context="Labelled points",
+            rebuild_standardised=True, rebuild_indices=True,
+        )
+        for name in features.columns:
+            frame[name] = features[name]
+    return frame

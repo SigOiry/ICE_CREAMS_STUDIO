@@ -24,7 +24,7 @@ The desktop application is distributed from the hosted UI repository:
 To install the app:
 
 - download the Windows installer directly here:
-  [`ICE_CREAMS_Installer_1_0_26.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_26.exe)
+  [`ICE_CREAMS_Installer_1_0_27.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_27.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu
   after installation
@@ -36,13 +36,14 @@ application.
 Patch notes for the current desktop release are available in
 [`PATCHNOTES.md`](PATCHNOTES.md).
 
-## What's New in 1.0.26
+## What's New in 1.0.27
 
 - Choose a sensor before training, applying, or validating a model; create new sensors with band centre wavelengths
 - Train from a CSV or a multiband GeoTIFF with labelled polygons and a chosen class column
 - Use sensor wavelengths to add NDVI and NDWI when the required bands are available
 - Apply generic raster models faster with larger inference windows and direct tabular prediction
-- Rebuilt the Windows desktop installer for version `1.0.26`
+- Validation accepts a CSV or a raw multiband TIFF with a labelled point or polygon shapefile
+- Rebuilt the Windows desktop installer for version `1.0.27`
 
 ## Current App Features
 
@@ -52,8 +53,11 @@ The Train tab takes one CSV or multiband GeoTIFF (`.tif` or `.tiff`). A CSV must
 contain a `True_Class` column. For a TIFF, select labelled polygons (`.shp`,
 `.gpkg`, or `.geojson`), then choose the class column from the attributes shown
 in the dropdown; text and numeric values are supported. Choose the sensor,
-model name, and output folder. Validation accepts raster and polygon pairs as
-well as CSV and XLSX tables.
+model name, and output folder. The training settings are available from the gear
+after the required data is selected. In Validation, select either a CSV with
+predictor and class columns or a multiband TIFF. A TIFF also requires a labelled
+point or polygon shapefile. Choose the class column from the CSV or shapefile,
+then use the matching button to pair its classes with model classes.
 
 Choose a sensor before training. Existing models are assigned to **Sentinel-2**.
 For a new sensor, choose **Create new sensor**, enter its name, and provide the

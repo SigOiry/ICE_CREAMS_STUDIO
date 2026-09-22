@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 from fastai.tabular.all import load_learner
 
 from ice_creams_feature_modes import (
@@ -29,7 +30,7 @@ from ice_creams_specialist_models import (
     prepare_class45_specialist_feature_dataframe,
     resolve_class45_specialist_model_path,
 )
-from ice_creams_labelled_raster import labelled_raster_dataframe
+from ice_creams_labelled_raster import labelled_raster_dataframe, labelled_point_raster_dataframe
 from ice_creams_generic_raster import labelled_generic_raster_dataframe, prepare_generic_features
 from ice_creams_feature_modes import FEATURE_MODE_GENERIC_RASTER
 
@@ -286,8 +287,8 @@ def _normalise_dataset_path(dataset_path: str) -> Path:
         raise FileNotFoundError(f"Validation dataset not found: {dataset_path}")
     if not candidate.is_file():
         raise ValueError(f"Validation dataset path must be a file: {dataset_path}")
-    if candidate.suffix.lower() not in {".csv", ".xlsx", ".tif", ".tiff"}:
-        raise ValueError("Validation dataset must be a .csv, .xlsx, .tif, or .tiff file.")
+    if candidate.suffix.lower() not in {".csv", ".xlsx", ".tif", ".tiff", ".shp", ".gpkg", ".geojson", ".json"}:
+        raise ValueError("Validation dataset must be a table, GeoTIFF, or vector file.")
     return candidate.resolve()
 
 
@@ -340,16 +341,61 @@ def _map_to_presence_absence(labels: pd.Series, target_class_label: str) -> pd.S
 
 
 def _read_validation_table(dataset_path: Path) -> pd.DataFrame:
-    """Read a CSV or XLSX validation table. XLSX always uses the first sheet."""
+    """Read a validation table or vector attribute table."""
     suffix = dataset_path.suffix.lower()
     if suffix == ".csv":
         frame = pd.read_csv(dataset_path, low_memory=False)
-    else:
+    elif suffix == ".xlsx":
         frame = pd.read_excel(dataset_path, sheet_name=0)
+    else:
+        vector = gpd.read_file(dataset_path)
+        frame = pd.DataFrame(vector.drop(columns=vector.geometry.name))
 
     if frame.empty:
         raise ValueError(f"Validation dataset is empty: {dataset_path}")
     return frame
+
+
+def validation_attribute_columns(dataset_path: str, polygon_path: str | None = None) -> list[str]:
+    """List available class columns for a table, vector, or raster's labels."""
+    dataset = _normalise_dataset_path(dataset_path)
+    if dataset.suffix.lower() in {".tif", ".tiff"}:
+        if not polygon_path:
+            return []
+        vector = gpd.read_file(polygon_path, rows=1)
+        return [str(name) for name in vector.columns if name != vector.geometry.name]
+    if dataset.suffix.lower() in {".shp", ".gpkg", ".geojson", ".json"}:
+        vector = gpd.read_file(dataset, rows=1)
+        return [str(name) for name in vector.columns if name != vector.geometry.name]
+    if dataset.suffix.lower() == ".csv":
+        return list(pd.read_csv(dataset, nrows=0).columns)
+    return list(pd.read_excel(dataset, nrows=0).columns)
+
+
+def validation_class_values(dataset_path: str, label_column: str, polygon_path: str | None = None) -> list[str]:
+    """Return distinct ground-truth classes in their dataset order."""
+    dataset = _normalise_dataset_path(dataset_path)
+    source = Path(polygon_path) if dataset.suffix.lower() in {".tif", ".tiff"} and polygon_path else dataset
+    suffix = source.suffix.lower()
+    if suffix in {".shp", ".gpkg", ".geojson", ".json"}:
+        frame = gpd.read_file(source)
+    elif suffix == ".csv":
+        frame = pd.read_csv(source, usecols=[label_column], low_memory=False)
+    elif suffix == ".xlsx":
+        frame = pd.read_excel(source, usecols=[label_column])
+    else:
+        raise ValueError("Select a labelled vector file for raster validation.")
+    if label_column not in frame.columns:
+        raise ValueError(f"Class column '{label_column}' was not found in {source.name}.")
+    labels = frame[label_column].astype("string").str.strip()
+    if labels.isna().any() or labels.eq("").any():
+        raise ValueError(f"Class column '{label_column}' contains missing values.")
+    return list(dict.fromkeys(labels.astype(str)))
+
+
+def model_class_values(model_path: str) -> list[str]:
+    """Read the exported model's class names for the matching dialog."""
+    return _extract_vocab(load_learner(str(_normalise_model_path(model_path)), cpu=True))
 
 
 def _extract_vocab(learner: Any) -> list[str]:
@@ -485,6 +531,7 @@ def validate_model(
     validation_mode: str = VALIDATION_MODE_MULTICLASS,
     target_class: str = DEFAULT_TARGET_CLASS,
     polygon_path: str | None = None,
+    class_mapping: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Validate a trained fastai model against a labelled validation dataset.
@@ -507,7 +554,7 @@ def validate_model(
 
     is_raster = dataset_file.suffix.lower() in {".tif", ".tiff"}
     if is_raster != bool(polygon_path):
-        raise ValueError("Raster validation requires both a multiband raster and labelled polygons.")
+        raise ValueError("Raster validation requires a multiband raster and labelled points or polygons.")
     validation_df = None
     if not is_raster:
         _emit_status(status_callback, f"Loading validation table: {dataset_file.name}")
@@ -539,7 +586,14 @@ def validate_model(
     detected_feature_mode_label = str(model_metadata["feature_mode_label"])
     if is_raster:
         _emit_status(status_callback, "Extracting labelled validation pixels")
-        if detected_feature_mode == FEATURE_MODE_GENERIC_RASTER:
+        label_vector = gpd.read_file(polygon_path)
+        if not label_vector.empty and label_vector.geometry.geom_type.isin(["Point", "MultiPoint"]).all():
+            validation_df = labelled_point_raster_dataframe(
+                str(dataset_file), str(polygon_path), label_name,
+                feature_mode=detected_feature_mode,
+                expected_schema=model_metadata.get("raster_schema"),
+            )
+        elif detected_feature_mode == FEATURE_MODE_GENERIC_RASTER:
             validation_df, _ = labelled_generic_raster_dataframe(
                 str(dataset_file), str(polygon_path), label_name,
                 expected_schema=model_metadata.get("raster_schema"),
@@ -693,6 +747,19 @@ def validate_model(
     confidence_values = preds.max(dim=1).values.cpu().numpy().astype(float)
     vocab = _extract_vocab(learner)
 
+    normalized_mapping: dict[str, str] | None = None
+    if class_mapping is not None:
+        normalized_mapping = {str(source).strip(): str(target).strip() for source, target in class_mapping.items()}
+        observed = set(ordered_validation_labels)
+        missing = observed - set(normalized_mapping)
+        invalid = set(normalized_mapping.values()) - set(vocab)
+        if missing or invalid:
+            raise ValueError(
+                "Invalid validation class correspondence: "
+                + (f"unmapped classes {sorted(missing)}. " if missing else "")
+                + (f"unknown model classes {sorted(invalid)}." if invalid else "")
+            )
+
     predicted_classes_raw = [
         str(vocab[class_idx]) if 0 <= class_idx < len(vocab) else str(class_idx)
         for class_idx in class_indices
@@ -732,12 +799,18 @@ def validate_model(
                     status_callback,
                     f"Warning: specialist validation refinement was skipped ({exc})",
                 )
-    predicted_classes = [map_validation_label(raw_label) for raw_label in predicted_classes_raw]
-    mapped_true_series = validation_df[label_name].map(map_validation_label).astype("string")
+    predicted_classes = (
+        predicted_classes_raw if normalized_mapping is not None
+        else [map_validation_label(raw_label) for raw_label in predicted_classes_raw]
+    )
+    mapped_true_series = validation_df[label_name].map(
+        (lambda raw_label: normalized_mapping[str(raw_label).strip()])
+        if normalized_mapping is not None else map_validation_label
+    ).astype("string")
     predicted_series = pd.Series(predicted_classes, name="Predicted_Class", dtype="string")
 
     if mode_name == VALIDATION_MODE_PRESENCE_ABSENCE:
-        target_class_label = map_validation_label(target_class_name)
+        target_class_label = target_class_name if normalized_mapping is not None else map_validation_label(target_class_name)
         _emit_status(
             status_callback,
             (
@@ -756,12 +829,12 @@ def validate_model(
         ordered_present_classes = []
         present_seen: set[str] = set()
         for raw_label in ordered_validation_labels:
-            mapped_label = map_validation_label(raw_label)
+            mapped_label = normalized_mapping[raw_label] if normalized_mapping is not None else map_validation_label(raw_label)
             if mapped_label != "<MISSING>" and mapped_label not in present_seen:
                 present_seen.add(mapped_label)
                 ordered_present_classes.append(mapped_label)
 
-        class_order_hint = [map_validation_label(class_name) for class_name in vocab]
+        class_order_hint = vocab if normalized_mapping is not None else [map_validation_label(class_name) for class_name in vocab]
 
     _emit_status(status_callback, "Computing validation metrics")
     metrics_df = _compute_metrics_table(
@@ -789,6 +862,8 @@ def validate_model(
     predictions_outside_validation_space = int((~predicted_series.isin(ordered_present_classes)).sum())
 
     predictions_df = validation_df.copy()
+    if normalized_mapping is not None:
+        predictions_df["Original_Validation_Class"] = predictions_df[label_name]
     predictions_df[label_name] = mapped_true_series
     predictions_df["Predicted_Class"] = predicted_classes
     predictions_df["Predicted_Confidence"] = confidence_values
@@ -840,7 +915,7 @@ def validate_model(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate an ICE CREAMS model")
-    parser.add_argument("dataset_path", help="Validation dataset path (.csv, .xlsx, .tif, or .tiff)")
+    parser.add_argument("dataset_path", help="Validation dataset path (.csv, .xlsx, vector, .tif, or .tiff)")
     parser.add_argument("model_path", help="Trained model path (.pkl)")
     parser.add_argument(
         "--label-column",
@@ -862,7 +937,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TARGET_CLASS,
         help="Target class for presence/absence mode (name or numeric class id)",
     )
-    parser.add_argument("--polygons", help="Labelled polygon file for raster validation")
+    parser.add_argument("--polygons", help="Labelled point or polygon file for raster validation")
     return parser
 
 

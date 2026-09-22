@@ -38,6 +38,9 @@ from validate_icecreams import (
     DEFAULT_TARGET_CLASS,
     VALIDATION_MODE_MULTICLASS,
     VALIDATION_MODE_PRESENCE_ABSENCE,
+    model_class_values,
+    validation_attribute_columns,
+    validation_class_values,
     validate_model,
 )
 from ice_creams_feature_modes import (
@@ -77,7 +80,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.26"
+APP_VERSION = "1.0.27"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -957,48 +960,26 @@ def main(page: ft.Page) -> None:
     )
     overlay_blocker = ft.Container()
 
-    apply_safe_field = ft.TextField(
-        value="",
-        hint_text="Select a single .zip/.tif file, a single .SAFE folder, or a batch folder",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
-    )
-    apply_mask_field = ft.TextField(
-        value="",
-        hint_text="Optional polygon mask (.shp, .gpkg, .geojson)",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
-    )
-    apply_output_path_field = ft.TextField(
-        value=str(default_apply_output_dir),
-        hint_text="Select an output folder",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
-    )
+    def path_readout(field: ft.Text, label: str) -> ft.Container:
+        return ft.Container(
+            height=64,
+            padding=ft.padding.symmetric(horizontal=14, vertical=8),
+            border_radius=14,
+            bgcolor=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
+            border=ft.border.all(1, ft.Colors.with_opacity(0.32, "#A6BFD9")),
+            content=ft.Column(
+                spacing=3,
+                controls=[ft.Text(label, size=10, color=LIQUID_MUTED), field],
+            ),
+        )
+
+    def path_text(value: str = "") -> ft.Text:
+        return ft.Text(value, size=12, color=LIQUID_TEXT, max_lines=2,
+                       overflow=ft.TextOverflow.ELLIPSIS, selectable=True)
+
+    apply_safe_field = path_text()
+    apply_mask_field = path_text()
+    apply_output_path_field = path_text(str(default_apply_output_dir))
     def sensor_options() -> list[ft.dropdown.Option]:
         return [
             *(ft.dropdown.Option(key=name, text=name) for name in sorted(available_sensors)),
@@ -1579,34 +1560,8 @@ def main(page: ft.Page) -> None:
         ),
     )
 
-    training_source_field = ft.TextField(
-        value="",
-        hint_text="Select a training CSV or multiband TIFF",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
-    )
-    training_output_dir_field = ft.TextField(
-        value=str(default_models_dir),
-        hint_text="Select where the trained model will be saved",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
-    )
+    training_source_field = path_text()
+    training_output_dir_field = path_text(str(default_models_dir))
     training_model_name_field = ft.TextField(
         value=f"ICECREAMS_{datetime.now().strftime('%Y%m%d_%H%M')}.pkl",
         hint_text="Model filename",
@@ -1721,28 +1676,15 @@ def main(page: ft.Page) -> None:
         scroll=ft.ScrollMode.AUTO,
     )
 
-    validation_dataset_field = ft.TextField(
-        value="",
-        hint_text="Select a table or multiband raster (.tif/.tiff)",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
-    )
+    validation_dataset_field = path_text()
     training_raster_field = ft.TextField(label="Training raster", read_only=True)
-    training_polygon_field = ft.TextField(label="Labelled polygons", read_only=True)
+    training_polygon_field = path_text()
     training_label_field = ft.Dropdown(
         label="Polygon class column",
         hint_text="Select the attribute containing class labels",
         options=[],
     )
-    validation_polygon_field = ft.TextField(label="Labelled polygons for raster validation", read_only=True)
+    validation_polygon_field = path_text()
     validation_sensor_dropdown = ft.Dropdown(
         label="Sensor", options=sensor_options(), hint_text="Choose a sensor first",
         border_radius=18, filled=True, fill_color=LIQUID_SURFACE_ALT,
@@ -1763,20 +1705,7 @@ def main(page: ft.Page) -> None:
         height=56,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
     )
-    validation_external_model_field = ft.TextField(
-        value="",
-        hint_text="Optional: choose an external .pkl model file",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
-    )
+    validation_external_model_field = path_text()
 
     def refresh_model_dropdowns(
         preferred_model_path: str | None = None,
@@ -1816,6 +1745,9 @@ def main(page: ft.Page) -> None:
                 preferred if preferred in valid_values else
                 current if current in valid_values else None
             )
+        apply_model_slot.visible = bool((apply_sensor_dropdown.value or "").strip())
+        if validation_model_section is not None:
+            validation_model_section.visible = bool((validation_sensor_dropdown.value or "").strip())
         validation_external_model_button.disabled = not bool(validation_sensor_dropdown.value)
         train_run_button.disabled = not bool(training_sensor_dropdown.value)
         train_run_button.tooltip = (
@@ -1918,6 +1850,10 @@ def main(page: ft.Page) -> None:
             elif target is validation_sensor_dropdown:
                 validation_model_dropdown.value = None
                 validation_external_model_field.value = ""
+                if validation_external_readout is not None:
+                    validation_external_readout.visible = False
+                validation_target_class_field.options = []
+                validation_target_class_field.value = None
             refresh_model_dropdowns(refresh=False)
             open_create_sensor_dialog(target)
             return
@@ -1933,6 +1869,10 @@ def main(page: ft.Page) -> None:
         elif target is validation_sensor_dropdown:
             validation_model_dropdown.value = None
             validation_external_model_field.value = ""
+            if validation_external_readout is not None:
+                validation_external_readout.visible = False
+            validation_target_class_field.options = []
+            validation_target_class_field.value = None
         refresh_model_dropdowns(refresh=False)
         if target is apply_sensor_dropdown:
             refresh_apply_preview()
@@ -1940,9 +1880,10 @@ def main(page: ft.Page) -> None:
         elif target is validation_sensor_dropdown:
             refresh_validation_preview()
         request_ui_refresh(force=True)
-    validation_label_column_field = ft.TextField(
-        value="Label_Char",
-        hint_text="Ground-truth label column name",
+    validation_label_column_field = ft.Dropdown(
+        label="Validation class column",
+        hint_text="Choose the dataset column containing known classes",
+        options=[],
         border_radius=18,
         filled=True,
         fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
@@ -1975,9 +1916,10 @@ def main(page: ft.Page) -> None:
         height=56,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
     )
-    validation_target_class_field = ft.TextField(
-        value=DEFAULT_TARGET_CLASS,
-        hint_text="Target class for presence/absence mode",
+    validation_target_class_field = ft.Dropdown(
+        value=None,
+        hint_text="Target model class for presence/absence mode",
+        options=[],
         border_radius=18,
         filled=True,
         fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
@@ -1993,20 +1935,125 @@ def main(page: ft.Page) -> None:
         visible=False,
         content=validation_target_class_field,
     )
-    validation_output_dir_field = ft.TextField(
-        value=str(default_validation_output_dir),
-        hint_text="Select an output folder for predictions and metrics CSVs",
-        read_only=True,
-        border_radius=18,
-        filled=True,
-        fill_color=ft.Colors.with_opacity(0.72, LIQUID_SURFACE_ALT),
-        border_color=ft.Colors.with_opacity(0.32, "#A6BFD9"),
-        focused_border_color=LIQUID_ACCENT,
-        color=LIQUID_TEXT,
-        text_size=14,
-        height=56,
-        content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
+    validation_output_dir_field = path_text(str(default_validation_output_dir))
+    validation_class_mapping: dict[str, str] | None = None
+    validation_mapping_signature: tuple[str, str, str, str] | None = None
+    validation_mapping_status = ft.Text(
+        "Match validation classes to model classes when their names differ.",
+        size=11, color=LIQUID_MUTED,
     )
+
+    def current_validation_mapping_signature() -> tuple[str, str, str, str]:
+        return (
+            (validation_dataset_field.value or "").strip(),
+            (validation_polygon_field.value or "").strip(),
+            (validation_label_column_field.value or "").strip(),
+            resolve_validation_model_path(),
+        )
+
+    def refresh_validation_mapping_access() -> None:
+        nonlocal validation_class_mapping, validation_mapping_signature
+        signature = current_validation_mapping_signature()
+        if validation_mapping_signature != signature:
+            validation_class_mapping = None
+            validation_mapping_signature = None
+            validation_mapping_status.value = "Match validation classes to model classes when their names differ."
+        validation_mapping_button.disabled = bool(state["busy"]) or not (signature[0] and signature[3])
+
+    async def refresh_validation_model_classes() -> None:
+        model_path = resolve_validation_model_path()
+        if not model_path:
+            validation_target_class_field.options = []
+            validation_target_class_field.value = None
+            refresh_validation_mapping_access()
+            request_ui_refresh()
+            return
+        try:
+            classes = await asyncio.to_thread(model_class_values, model_path)
+        except Exception as exc:
+            show_error("validation", f"Could not read model classes: {exc}")
+            return
+        validation_target_class_field.options = [ft.dropdown.Option(key=name, text=name) for name in classes]
+        if validation_target_class_field.value not in classes:
+            validation_target_class_field.value = DEFAULT_TARGET_CLASS if DEFAULT_TARGET_CLASS in classes else (classes[0] if classes else None)
+        refresh_validation_mapping_access()
+        request_ui_refresh()
+
+    async def show_validation_mapping(_: ft.ControlEvent) -> None:
+        nonlocal validation_class_mapping, validation_mapping_signature
+        if validation_mapping_button.disabled:
+            return
+        dataset, polygons, label_column, model_path = current_validation_mapping_signature()
+        if not label_column:
+            show_error("validation", "Choose the validation class column first.")
+            return
+        if Path(dataset).suffix.lower() in {".tif", ".tiff"} and not polygons:
+            show_error("validation", "Choose labelled points or polygons for the raster first.")
+            return
+        try:
+            dataset_classes, model_classes = await asyncio.gather(
+                asyncio.to_thread(validation_class_values, dataset, label_column, polygons or None),
+                asyncio.to_thread(model_class_values, model_path),
+            )
+        except Exception as exc:
+            show_error("validation", f"Could not load validation classes: {exc}")
+            return
+        if not dataset_classes or not model_classes:
+            show_error("validation", "Both the dataset and model need class names.")
+            return
+        rows: list[tuple[ft.Dropdown, ft.Dropdown]] = []
+        for source_class in dataset_classes:
+            chosen = (validation_class_mapping or {}).get(source_class)
+            if chosen not in model_classes:
+                chosen = next((name for name in model_classes if name.casefold() == source_class.casefold()), None)
+            model_choice = ft.Dropdown(
+                width=220, value=chosen,
+                options=[ft.dropdown.Option(key=name, text=name) for name in model_classes],
+            )
+            validation_choice = ft.Dropdown(
+                width=220, value=source_class,
+                options=[ft.dropdown.Option(key=name, text=name) for name in dataset_classes],
+            )
+            rows.append((model_choice, validation_choice))
+        error_text = ft.Text("", size=12, color="#B23B4D")
+
+        def save_mapping(_: ft.ControlEvent) -> None:
+            nonlocal validation_class_mapping, validation_mapping_signature
+            selected = [(model.value, validation.value) for model, validation in rows]
+            if any(not model or not validation for model, validation in selected):
+                error_text.value = "Choose a model and validation class in every row."
+            elif len({validation for _, validation in selected}) != len(dataset_classes):
+                error_text.value = "Use each validation class exactly once."
+            else:
+                validation_class_mapping = {validation: model for model, validation in selected}
+                validation_mapping_signature = current_validation_mapping_signature()
+                validation_mapping_status.value = f"{len(selected)} validation class(es) matched to model classes."
+                page.pop_dialog()
+                request_ui_refresh(force=True)
+                return
+            page.update()
+
+        dialog = ft.AlertDialog(
+            modal=True, title=ft.Text("Match validation and model classes"),
+            content=ft.Column(
+                width=500, height=430, scroll=ft.ScrollMode.AUTO, spacing=12,
+                controls=[
+                    ft.Text("Choose equivalent classes on each row. Every validation class needs one model class.", size=12),
+                    ft.DataTable(
+                        column_spacing=8,
+                        horizontal_margin=8,
+                        columns=[ft.DataColumn(ft.Text("Model class")), ft.DataColumn(ft.Text("Validation class"))],
+                        rows=[ft.DataRow(cells=[ft.DataCell(model), ft.DataCell(validation)]) for model, validation in rows],
+                    ),
+                    error_text,
+                ],
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=lambda _: page.pop_dialog()),
+                ft.ElevatedButton("Save matching", on_click=save_mapping),
+            ],
+        )
+        page.show_dialog(dialog)
     validation_output_preview = ft.Text(
         "Select dataset, model, and output folder to preview validation output files.",
         size=12,
@@ -2357,6 +2404,7 @@ def main(page: ft.Page) -> None:
         return str(Path(output_folder) / f"{dataset_stem}__{model_stem}__metrics.csv")
 
     def refresh_validation_preview() -> None:
+        refresh_validation_mapping_access()
         dataset_path = validation_dataset_field.value.strip()
         model_path = resolve_validation_model_path()
         output_folder = validation_output_dir_field.value.strip()
@@ -2369,6 +2417,12 @@ def main(page: ft.Page) -> None:
             return
         if not dataset_path:
             validation_output_preview.value = "Select a dataset to preview output files."
+            return
+        if Path(dataset_path).suffix.lower() in {".tif", ".tiff"} and not (validation_polygon_field.value or "").strip():
+            validation_output_preview.value = "Select the validation shapefile for this raster."
+            return
+        if not (validation_label_column_field.value or "").strip():
+            validation_output_preview.value = "Select the validation class column."
             return
         if not model_path:
             validation_output_preview.value = "Select a model to preview output files."
@@ -4364,6 +4418,11 @@ def main(page: ft.Page) -> None:
                 sync_validation_mode_controls(refresh=False)
             except NameError:
                 pass
+            try:
+                sync_training_input_ui()
+                refresh_validation_mapping_access()
+            except NameError:
+                pass
         try:
             refresh_apply_run_button_state()
         except NameError:
@@ -4621,15 +4680,38 @@ def main(page: ft.Page) -> None:
         is_raster = bool((training_raster_field.value or "").strip())
         if training_polygon_section is not None:
             training_polygon_section.visible = is_raster
-        if train_settings_panel_ref is not None:
-            train_settings_panel_ref.visible = is_raster
-        if train_paths_panel_ref is not None and isinstance(train_paths_panel_ref.content, ft.Column):
-            row = train_paths_panel_ref.content.controls[1]
-            if isinstance(row, ft.ResponsiveRow):
-                for card in row.controls:
-                    if isinstance(card, ft.Container):
-                        card.height = 465 if is_raster else 360
+        training_settings_button.disabled = bool(state["busy"]) or not (
+            bool((training_source_field.value or "").strip())
+            and (not is_raster or (
+                bool((training_polygon_field.value or "").strip())
+                and bool((training_label_field.value or "").strip())
+            ))
+        )
         request_ui_refresh(force=True)
+
+    def open_training_settings(_: ft.ControlEvent) -> None:
+        if training_settings_button.disabled or state["busy"]:
+            return
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Training settings"),
+            content=ft.Column(
+                width=520, height=430, scroll=ft.ScrollMode.AUTO, spacing=12,
+                controls=[
+                    ft.Text("Feature mode", weight=ft.FontWeight.W_600),
+                    training_mode_dropdown,
+                    ft.Text("Model method", weight=ft.FontWeight.W_600),
+                    training_spectral_cnn_checkbox,
+                    training_sequence_standardization_checkbox,
+                    ft.Text("Epochs", weight=ft.FontWeight.W_600),
+                    training_epochs_field,
+                    ft.Text("Validation split (%)", weight=ft.FontWeight.W_600),
+                    training_split_field,
+                ],
+            ),
+            actions=[ft.TextButton("Done", on_click=lambda _: page.pop_dialog())],
+        )
+        page.show_dialog(dialog)
 
     async def choose_training_dataset(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4774,36 +4856,76 @@ def main(page: ft.Page) -> None:
         if not validation_dataset_field.value.strip() and default_validation_source.exists():
             initial_dir = str(default_validation_source)
         files = await ft.FilePicker().pick_files(
-            dialog_title="Select a validation table or multiband raster",
+            dialog_title="Select a validation CSV or multiband TIFF",
             initial_directory=initial_dir,
             file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["csv", "xlsx", "tif", "tiff"],
+            allowed_extensions=["csv", "tif", "tiff"],
             allow_multiple=False,
         )
         if not files:
             return
 
         selected_path = Path(files[0].path)
-        if selected_path.suffix.lower() not in {".csv", ".xlsx", ".tif", ".tiff"}:
-            show_error("validation", "Please select a .csv, .xlsx, .tif or .tiff validation dataset.")
+        if selected_path.suffix.lower() not in {".csv", ".tif", ".tiff"} or not selected_path.is_file():
+            show_error("validation", "Choose an existing CSV or multiband TIFF validation dataset.")
             return
 
-        validation_dataset_field.value = str(selected_path)
+        validation_dataset_field.value = str(selected_path.resolve())
+        validation_polygon_field.value = ""
+        validation_label_column_field.value = None
+        await sync_validation_dataset_ui()
         refresh_validation_preview()
         push_validation_status(f"Validation dataset selected: {selected_path.name}")
+
+    async def sync_validation_dataset_ui() -> None:
+        dataset = (validation_dataset_field.value or "").strip()
+        is_raster = Path(dataset).suffix.lower() in {".tif", ".tiff"}
+        if validation_polygon_section is not None:
+            validation_polygon_section.visible = is_raster
+        validation_label_column_field.hint_text = (
+            "Choose the class column from the validation shapefile"
+            if is_raster else "Choose the class column from the validation CSV"
+        )
+        try:
+            columns = await asyncio.to_thread(
+                validation_attribute_columns, dataset,
+                (validation_polygon_field.value or "").strip() or None,
+            ) if dataset else []
+        except Exception as exc:
+            show_error("validation", f"Could not read validation columns: {exc}")
+            columns = []
+        validation_label_column_field.options = [ft.dropdown.Option(key=name, text=name) for name in columns]
+        if validation_label_column_field.value not in columns:
+            validation_label_column_field.value = (
+                next((name for name in ("Label_Char", "True_Class") if name in columns), None)
+                if not is_raster and Path(dataset).suffix.lower() == ".csv"
+                else None
+            )
+        refresh_validation_mapping_access()
+        request_ui_refresh(force=True)
 
     async def choose_validation_polygons(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
+        if Path((validation_dataset_field.value or "").strip()).suffix.lower() not in {".tif", ".tiff"}:
+            show_error("validation", "Choose a multiband TIFF before selecting its validation shapefile.")
+            return
         files = await ft.FilePicker().pick_files(
-            dialog_title="Select labelled validation polygons",
+            dialog_title="Select a labelled validation shapefile (points or polygons)",
             file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["shp", "gpkg", "geojson", "json"],
+            allowed_extensions=["shp"],
             allow_multiple=False,
         )
         if files:
-            validation_polygon_field.value = str(Path(files[0].path).resolve())
-            push_validation_status(f"Validation polygons selected: {Path(files[0].path).name}")
+            selected_path = Path(files[0].path)
+            if selected_path.suffix.lower() != ".shp" or not selected_path.is_file():
+                show_error("validation", "Choose an existing validation shapefile (.shp).")
+                return
+            validation_polygon_field.value = str(selected_path.resolve())
+            validation_label_column_field.value = None
+            await sync_validation_dataset_ui()
+            refresh_validation_preview()
+            push_validation_status(f"Validation shapefile selected: {selected_path.name}")
 
     async def choose_validation_model_file(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4834,6 +4956,9 @@ def main(page: ft.Page) -> None:
             return
 
         validation_external_model_field.value = str(selected_path)
+        if validation_external_readout is not None:
+            validation_external_readout.visible = True
+        await refresh_validation_model_classes()
         refresh_validation_preview()
         push_validation_status(f"External model selected: {selected_path.name}")
 
@@ -4851,26 +4976,35 @@ def main(page: ft.Page) -> None:
             refresh_validation_preview()
             push_validation_status("Validation output directory selected.")
 
-    def clear_validation_external_model(_: ft.ControlEvent) -> None:
+    async def clear_validation_external_model(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
         if not validation_external_model_field.value.strip():
             push_validation_status("External model path is already empty.", level="warning")
             return
         validation_external_model_field.value = ""
+        if validation_external_readout is not None:
+            validation_external_readout.visible = False
+        await refresh_validation_model_classes()
         refresh_validation_preview()
         push_validation_status("Cleared external model selection. Using dropdown model.")
 
-    def on_validation_model_select(_: ft.ControlEvent) -> None:
+    async def on_validation_model_select(_: ft.ControlEvent) -> None:
         selected_model = (validation_model_dropdown.value or "").strip()
         if not selected_model:
             push_validation_status("No model selected.", level="warning")
             refresh_validation_preview()
             return
+        validation_external_model_field.value = ""
+        if validation_external_readout is not None:
+            validation_external_readout.visible = False
+        await refresh_validation_model_classes()
         refresh_validation_preview()
         push_validation_status(f"Dropdown model selected: {Path(selected_model).name}")
 
     def on_validation_label_column_change(_: ft.ControlEvent) -> None:
+        refresh_validation_mapping_access()
+        refresh_validation_preview()
         label_name = (validation_label_column_field.value or "").strip()
         if label_name:
             push_validation_status(f"Validation label column set to '{label_name}'.")
@@ -4882,8 +5016,6 @@ def main(page: ft.Page) -> None:
         is_presence_absence = selected_mode == VALIDATION_MODE_PRESENCE_ABSENCE
         validation_target_class_container.visible = is_presence_absence
         validation_target_class_field.disabled = not is_presence_absence
-        if not validation_target_class_field.value.strip():
-            validation_target_class_field.value = DEFAULT_TARGET_CLASS
         if refresh:
             request_ui_refresh()
 
@@ -4902,8 +5034,8 @@ def main(page: ft.Page) -> None:
     def on_validation_target_class_change(_: ft.ControlEvent) -> None:
         target_label = (validation_target_class_field.value or "").strip()
         if not target_label:
-            validation_target_class_field.value = DEFAULT_TARGET_CLASS
-            target_label = DEFAULT_TARGET_CLASS
+            push_validation_status("Choose a target model class.", level="warning")
+            return
         push_validation_status(f"Presence/absence target class set to '{target_label}'.")
 
     def resolve_training_feature_mode() -> tuple[str, str] | None:
@@ -5720,7 +5852,10 @@ def main(page: ft.Page) -> None:
             return
         is_raster_validation = Path(dataset_path).suffix.lower() in {".tif", ".tiff"}
         if is_raster_validation and not (validation_polygon_field.value or "").strip():
-            show_error("validation", "Choose labelled polygons for the validation raster.")
+            show_error("validation", "Choose a labelled point or polygon shapefile for the validation raster.")
+            return
+        if is_raster_validation and Path(validation_polygon_field.value).suffix.lower() != ".shp":
+            show_error("validation", "Choose a validation shapefile (.shp) for the raster.")
             return
 
         model_path = resolve_validation_model_path()
@@ -5737,7 +5872,7 @@ def main(page: ft.Page) -> None:
             return
 
         validation_mode = (validation_mode_dropdown.value or VALIDATION_MODE_MULTICLASS).strip()
-        target_class = (validation_target_class_field.value or "").strip() or DEFAULT_TARGET_CLASS
+        target_class = (validation_target_class_field.value or "").strip()
         if validation_mode == VALIDATION_MODE_PRESENCE_ABSENCE and not target_class:
             show_error("validation", "Provide a target class for presence/absence validation.")
             return
@@ -5799,6 +5934,7 @@ def main(page: ft.Page) -> None:
                 validation_mode=validation_mode,
                 target_class=target_class,
                 polygon_path=(validation_polygon_field.value or "").strip() if is_raster_validation else None,
+                class_mapping=(validation_class_mapping if validation_mapping_signature == current_validation_mapping_signature() else None),
             )
             validation_result = result
             detected_model_family_label = str(
@@ -5943,6 +6079,12 @@ def main(page: ft.Page) -> None:
         on_click=choose_training_output_dir,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
     )
+    training_settings_button = ft.IconButton(
+        icon=ft.Icons.SETTINGS,
+        tooltip="Training settings become available after selecting the required data and class column",
+        on_click=open_training_settings,
+        disabled=True,
+    )
     train_run_button = ft.ElevatedButton(
         "Train Model",
         icon=ft.Icons.AUTO_GRAPH,
@@ -5957,7 +6099,7 @@ def main(page: ft.Page) -> None:
         on_click=choose_validation_dataset,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
     )
-    validation_polygon_button = ft.ElevatedButton("Select Polygons", on_click=choose_validation_polygons)
+    validation_polygon_button = ft.ElevatedButton("Select Validation Shapefile", on_click=choose_validation_polygons)
     validation_dropdown_model_button = ft.ElevatedButton(
         "Clear External Model",
         icon=ft.Icons.UNDO,
@@ -5976,6 +6118,12 @@ def main(page: ft.Page) -> None:
         icon=ft.Icons.FOLDER_OPEN,
         on_click=choose_validation_output_dir,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
+    )
+    validation_mapping_button = ft.IconButton(
+        icon=ft.Icons.COMPARE_ARROWS,
+        tooltip="Match validation classes to model classes",
+        on_click=show_validation_mapping,
+        disabled=True,
     )
     validation_run_button = ft.ElevatedButton(
         "Run Validation",
@@ -6008,6 +6156,7 @@ def main(page: ft.Page) -> None:
         train_source_folder_button,
         train_source_clear_button,
         train_output_folder_button,
+        training_settings_button,
         train_run_button,
         training_model_name_field,
         training_sensor_dropdown,
@@ -6022,6 +6171,7 @@ def main(page: ft.Page) -> None:
         validation_dropdown_model_button,
         validation_external_model_button,
         validation_output_button,
+        validation_mapping_button,
         validation_model_dropdown,
         validation_sensor_dropdown,
         validation_label_column_field,
@@ -6036,9 +6186,10 @@ def main(page: ft.Page) -> None:
     validation_model_dropdown.on_select = on_validation_model_select
     validation_sensor_dropdown.on_select = lambda _: on_sensor_select(validation_sensor_dropdown)
     training_sensor_dropdown.on_select = lambda _: on_sensor_select(training_sensor_dropdown)
-    validation_label_column_field.on_submit = on_validation_label_column_change
+    training_label_field.on_select = lambda _: sync_training_input_ui()
+    validation_label_column_field.on_select = on_validation_label_column_change
     validation_mode_dropdown.on_select = on_validation_mode_select
-    validation_target_class_field.on_submit = on_validation_target_class_change
+    validation_target_class_field.on_select = on_validation_target_class_change
     training_mode_dropdown.on_select = on_training_mode_select
     training_spectral_cnn_checkbox.on_change = on_training_model_family_toggle
     training_sequence_standardization_checkbox.on_change = on_training_sequence_standardization_toggle
@@ -6067,19 +6218,21 @@ def main(page: ft.Page) -> None:
     )
     validation_intro_panel = _workflow_intro_panel(
         "Validate a Model",
-        "Evaluate a trained model against labelled data and export reproducible metrics and predictions.",
+        "Compare model predictions with known classes from a CSV or a multiband TIFF with labelled shapefile.",
         [
-            "Select validation dataset",
-            "Select model and label field",
-            "Choose output folder and mode",
+            "Select validation data and its class column",
+            "Choose a sensor and model, then match classes if needed",
+            "Choose output folder and validation mode",
             "Run and review confusion matrix",
         ],
     )
     train_paths_panel_ref: ft.Container | None = None
     training_polygon_section: ft.Container | None = None
-    train_settings_panel_ref: ft.Container | None = None
     train_main_content_ref: ft.Container | None = None
     validation_paths_panel_ref: ft.Container | None = None
+    validation_polygon_section: ft.Container | None = None
+    validation_model_section: ft.Container | None = None
+    validation_external_readout: ft.Container | None = None
     validation_preview_panel_ref: ft.Container | None = None
     validation_main_content_ref: ft.Container | None = None
     history_main_content_ref: ft.Container | None = None
@@ -6108,6 +6261,7 @@ def main(page: ft.Page) -> None:
                             border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
                             content=ft.Column(
                                 spacing=10,
+                                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                                 controls=[
                                     ft.Text(
                                         "Image Input",
@@ -6115,7 +6269,7 @@ def main(page: ft.Page) -> None:
                                         weight=ft.FontWeight.W_600,
                                         color=LIQUID_TEXT,
                                     ),
-                                    apply_safe_field,
+                                    path_readout(apply_safe_field, "Selected image or folder"),
                                     ft.Row(
                                         wrap=True,
                                         spacing=8,
@@ -6140,6 +6294,7 @@ def main(page: ft.Page) -> None:
                             border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
                             content=ft.Column(
                                 spacing=10,
+                                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                                 controls=[
                                     ft.Text(
                                         "Mask",
@@ -6147,7 +6302,7 @@ def main(page: ft.Page) -> None:
                                         weight=ft.FontWeight.W_600,
                                         color=LIQUID_TEXT,
                                     ),
-                                    apply_mask_field,
+                                    path_readout(apply_mask_field, "Selected mask (optional)"),
                                     ft.Row(wrap=True, spacing=8, controls=[apply_mask_button, apply_clear_mask_button]),
                                     ft.Text(
                                         "If supplied, only pixels inside this polygon mask are classified.",
@@ -6165,6 +6320,7 @@ def main(page: ft.Page) -> None:
                             border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
                             content=ft.Column(
                                 spacing=10,
+                                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                                 controls=[
                                     ft.Text(
                                         "Output",
@@ -6172,8 +6328,8 @@ def main(page: ft.Page) -> None:
                                         weight=ft.FontWeight.W_600,
                                         color=LIQUID_TEXT,
                                     ),
-                                    apply_output_path_field,
-                                    apply_output_folder_button,
+                                    path_readout(apply_output_path_field, "Output folder"),
+                                    ft.Row(controls=[apply_output_folder_button]),
                                     ft.Text(
                                         "GeoTIFF files are auto-named and written in this folder.",
                                         size=11,
@@ -6226,6 +6382,11 @@ def main(page: ft.Page) -> None:
         ),
     )
 
+    apply_model_slot = ft.Container(
+        col={"xs": 12, "md": 6},
+        visible=False,
+        content=ft.Column(horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[apply_model_dropdown]),
+    )
     apply_model_panel = ft.Container(
         padding=ft.padding.symmetric(horizontal=18, vertical=16),
         border_radius=22,
@@ -6240,8 +6401,18 @@ def main(page: ft.Page) -> None:
                     weight=ft.FontWeight.W_600,
                     color=LIQUID_TEXT,
                 ),
-                apply_sensor_dropdown,
-                apply_model_dropdown,
+                ft.ResponsiveRow(
+                    columns=12,
+                    spacing=12,
+                    run_spacing=12,
+                    controls=[
+                        ft.Container(col={"xs": 12, "md": 6}, content=ft.Column(
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                            controls=[apply_sensor_dropdown],
+                        )),
+                        apply_model_slot,
+                    ],
+                ),
                 apply_salt_pepper_cleanup_checkbox,
                 ft.Text(
                     "Choose a sensor, then its model. Leave the checkbox on to smooth small salt-and-pepper patches in post-processing.",
@@ -6368,7 +6539,7 @@ def main(page: ft.Page) -> None:
     history_view_initialized = {"value": False}
 
     def _build_train_view() -> ft.Control:
-        nonlocal train_main_content_ref, train_paths_panel_ref, train_settings_panel_ref, training_polygon_section
+        nonlocal train_main_content_ref, train_paths_panel_ref, training_polygon_section
         cached_view = lazy_tab_view_cache.get("train")
         if cached_view is not None:
             return cached_view
@@ -6376,95 +6547,51 @@ def main(page: ft.Page) -> None:
         training_polygon_section = ft.Container(
             visible=False,
             content=ft.Column(
-                spacing=8,
+                spacing=9,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
-                    training_polygon_field,
-                    train_polygon_button,
+                    path_readout(training_polygon_field, "Labelled polygons"),
+                    ft.Row(controls=[train_polygon_button]),
                     training_label_field,
-                    ft.Text("Choose the polygon attribute containing the class of each feature.", size=11, color=LIQUID_MUTED),
+                    ft.Text("Choose the polygon attribute containing the training class.", size=11, color=LIQUID_MUTED),
                 ],
             ),
         )
-
         train_paths_panel = _glass_panel(
             padding=18,
             content=ft.Column(
-                spacing=12,
+                spacing=14,
                 controls=[
-                    ft.Text(
-                        "Training Paths",
-                        size=14,
-                        weight=ft.FontWeight.W_600,
-                        color=LIQUID_TEXT,
-                    ),
+                    ft.Text("Training setup", size=16, weight=ft.FontWeight.W_700, color=LIQUID_TEXT),
                     ft.ResponsiveRow(
-                        columns=12,
-                        run_spacing=12,
-                        spacing=12,
+                        columns=12, spacing=16, run_spacing=16,
                         controls=[
                             ft.Container(
-                                col={"xs": 12, "md": 6},
-                                height=train_paths_card_height,
-                                padding=14,
-                                border_radius=20,
+                                col={"xs": 12, "md": 6}, padding=16, border_radius=20,
                                 bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
-                                border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
-                                content=ft.Column(
-                                    expand=True,
-                                    spacing=10,
-                                    controls=[
-                                        ft.Text(
-                                            "Input Data",
-                                            size=14,
-                                            weight=ft.FontWeight.W_600,
-                                            color=LIQUID_TEXT,
-                                        ),
-                                        training_source_field,
-                                        ft.Row(
-                                            wrap=True,
-                                            spacing=8,
-                                            controls=[
-                                                train_source_button,
-                                                train_source_clear_button,
-                                            ],
-                                        ),
-                                        training_polygon_section,
-                                        ft.Text(
-                                            "CSV: True_Class supplies labels. TIFF: choose polygons and their class column.",
-                                            size=11,
-                                            color=LIQUID_MUTED,
-                                        ),
-                                    ],
-                                ),
+                                content=ft.Column(spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+                                    ft.Text("1  Training data", size=14, weight=ft.FontWeight.W_600, color=LIQUID_TEXT),
+                                    path_readout(training_source_field, "CSV or multiband TIFF"),
+                                    ft.Row(wrap=True, spacing=8, controls=[train_source_button, train_source_clear_button]),
+                                    training_polygon_section,
+                                    ft.Text("A CSV supplies True_Class. A TIFF needs labelled polygons and a class column.", size=11, color=LIQUID_MUTED),
+                                ]),
                             ),
                             ft.Container(
-                                col={"xs": 12, "md": 6},
-                                height=train_paths_card_height,
-                                padding=14,
-                                border_radius=20,
+                                col={"xs": 12, "md": 6}, padding=16, border_radius=20,
                                 bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
-                                border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
-                                content=ft.Column(
-                                    expand=True,
-                                    spacing=10,
-                                    controls=[
-                                        ft.Text(
-                                            "Model Output",
-                                            size=14,
-                                            weight=ft.FontWeight.W_600,
-                                            color=LIQUID_TEXT,
-                                        ),
-                                        training_output_dir_field,
-                                        train_output_folder_button,
-                                        training_sensor_dropdown,
-                                        training_model_name_field,
-                                        ft.Text(
-                                            "The trained model is saved in the selected folder.",
-                                            size=11,
-                                            color=LIQUID_MUTED,
-                                        ),
-                                    ],
-                                ),
+                                content=ft.Column(spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+                                    ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, controls=[
+                                        ft.Text("2  Model details", size=14, weight=ft.FontWeight.W_600, color=LIQUID_TEXT),
+                                        training_settings_button,
+                                    ]),
+                                    training_sensor_dropdown,
+                                    ft.Text("Model name", size=11, color=LIQUID_MUTED),
+                                    training_model_name_field,
+                                    path_readout(training_output_dir_field, "Save model in"),
+                                    ft.Row(controls=[train_output_folder_button]),
+                                    ft.Text("The gear opens feature mode, method, epochs, and validation split once training data is ready.", size=11, color=LIQUID_MUTED),
+                                ]),
                             ),
                         ],
                     ),
@@ -6472,178 +6599,34 @@ def main(page: ft.Page) -> None:
             ),
         )
         train_paths_panel_ref = train_paths_panel
-
         train_main_content = ft.Container(
             width=1460,
             content=ft.Column(
-                expand=True,
-                scroll=ft.ScrollMode.AUTO,
-                spacing=16,
+                expand=True, scroll=ft.ScrollMode.AUTO, spacing=16,
                 controls=[
                     train_intro_panel,
                     train_paths_panel,
-                    ft.Container(
-                        visible=False,
-                        padding=ft.padding.symmetric(horizontal=18, vertical=16),
-                        border_radius=22,
-                        bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
-                        border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
-                        content=ft.Column(
-                            spacing=14,
-                            controls=[
-                                ft.Text(
-                                    "Training Settings",
-                                    size=14,
-                                    weight=ft.FontWeight.W_600,
-                                    color=LIQUID_TEXT,
-                                ),
-                                ft.ResponsiveRow(
-                                    columns=12,
-                                    run_spacing=16,
-                                    controls=[
-                                        ft.Container(
-                                            col={"xs": 12, "md": 3},
-                                            content=ft.Column(
-                                                spacing=8,
-                                                controls=[
-                                                    ft.Text(
-                                                        "Feature Mode",
-                                                        size=13,
-                                                        weight=ft.FontWeight.W_500,
-                                                        color=LIQUID_SUBTEXT,
-                                                    ),
-                                                    training_mode_dropdown,
-                                                    ft.Text(
-                                                        "Use Generic Multiband Raster for drone and other images with arbitrary bands. Sentinel-2 modes retain their established features.",
-                                                        size=11,
-                                                        color=LIQUID_MUTED,
-                                                    ),
-                                                ],
-                                            ),
-                                        ),
-                                        ft.Container(
-                                            col={"xs": 12, "md": 3},
-                                            content=ft.Column(
-                                                spacing=8,
-                                                controls=[
-                                                    ft.Text(
-                                                        "Model Method",
-                                                        size=13,
-                                                        weight=ft.FontWeight.W_500,
-                                                        color=LIQUID_SUBTEXT,
-                                                    ),
-                                                    training_spectral_cnn_checkbox,
-                                                    training_sequence_standardization_checkbox,
-                                                    ft.Text(
-                                                        "Checked: use the spectral 1D CNN. Unchecked: use the legacy tabular dense network. The standardized-reflectance option is stored with CNN models and auto-detected during apply and validation.",
-                                                        size=11,
-                                                        color=LIQUID_MUTED,
-                                                    ),
-                                                ],
-                                            ),
-                                        ),
-                                        ft.Container(
-                                            col={"xs": 12, "md": 3},
-                                            content=ft.Column(
-                                                spacing=8,
-                                                controls=[
-                                                    ft.Text(
-                                                        "Epochs",
-                                                        size=13,
-                                                        weight=ft.FontWeight.W_500,
-                                                        color=LIQUID_SUBTEXT,
-                                                    ),
-                                                    training_epochs_field,
-                                                    ft.Text(
-                                                        "Enter an integer between 1 and 1000.",
-                                                        size=11,
-                                                        color=LIQUID_MUTED,
-                                                    ),
-                                                ],
-                                            ),
-                                        ),
-                                        ft.Container(
-                                            col={"xs": 12, "md": 3},
-                                            content=ft.Column(
-                                                spacing=8,
-                                                controls=[
-                                                    ft.Text(
-                                                        "Validation Split",
-                                                        size=13,
-                                                        weight=ft.FontWeight.W_500,
-                                                        color=LIQUID_SUBTEXT,
-                                                    ),
-                                                    training_split_field,
-                                                    ft.Text(
-                                                        "Validation split in percent (1 to 99).",
-                                                        size=11,
-                                                        color=LIQUID_MUTED,
-                                                    ),
-                                                ],
-                                            ),
-                                        ),
-                                    ],
-                                ),
-                            ],
-                        ),
-                    ),
-                    ft.ResponsiveRow(
-                        columns=12,
-                        run_spacing=16,
-                        controls=[
-                            ft.Container(
-                                col={"xs": 12, "lg": 4},
-                                content=_glass_panel(
-                                    padding=18,
-                                    content=train_progress_card_body,
-                                ),
-                            ),
-                            ft.Container(
-                                col={"xs": 12, "lg": 8},
-                                content=_glass_panel(
-                                    padding=18,
-                                    content=train_feed_card_body,
-                                ),
-                            ),
-                        ],
-                    ),
+                    ft.ResponsiveRow(columns=12, run_spacing=16, controls=[
+                        ft.Container(col={"xs": 12, "lg": 4}, content=_glass_panel(padding=18, content=train_progress_card_body)),
+                        ft.Container(col={"xs": 12, "lg": 8}, content=_glass_panel(padding=18, content=train_feed_card_body)),
+                    ]),
                 ],
             ),
         )
         train_main_content_ref = train_main_content
-        train_column = train_main_content.content
-        if isinstance(train_column, ft.Column) and len(train_column.controls) >= 3:
-            train_settings_panel_ref = train_column.controls[2]
-
         train_run_badge = ft.Container(
-            right=24,
-            bottom=20,
-            content=_glass_panel(
-                padding=10,
-                content=ft.Row(
-                    spacing=10,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    controls=[
-                        train_spinner,
-                        train_run_button,
-                    ],
-                ),
-            ),
+            right=24, bottom=20,
+            content=_glass_panel(padding=10, content=ft.Row(
+                spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[train_spinner, train_run_button],
+            )),
         )
-
         train_view = _glass_panel(
             expand=True,
-            content=ft.Stack(
-                expand=True,
-                controls=[
-                    ft.Container(
-                        expand=True,
-                        alignment=ft.Alignment(0, -1),
-                        content=train_main_content,
-                    ),
-                    train_run_badge,
-                ],
-            ),
+            content=ft.Stack(expand=True, controls=[
+                ft.Container(expand=True, alignment=ft.Alignment(0, -1), content=train_main_content),
+                train_run_badge,
+            ]),
         )
         lazy_tab_layout_refs["train"]["main_content"] = train_main_content
         lazy_tab_layout_refs["train"]["badge"] = train_run_badge
@@ -6692,105 +6675,80 @@ def main(page: ft.Page) -> None:
 
     def _build_validation_view() -> ft.Control:
         nonlocal validation_main_content_ref, validation_paths_panel_ref, validation_preview_panel_ref
+        nonlocal validation_polygon_section, validation_model_section, validation_external_readout
         cached_view = lazy_tab_view_cache.get("validation")
         if cached_view is not None:
             return cached_view
 
+        validation_polygon_section = ft.Container(
+            visible=Path((validation_dataset_field.value or "")).suffix.lower() in {".tif", ".tiff"},
+            content=ft.Column(spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+                path_readout(validation_polygon_field, "Validation shapefile (.shp): points or polygons"),
+                ft.Row(controls=[validation_polygon_button]),
+            ]),
+        )
+        validation_model_section = ft.Container(
+            visible=bool((validation_sensor_dropdown.value or "").strip()),
+            content=ft.Column(horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[validation_model_dropdown]),
+        )
+        validation_external_readout = ft.Container(
+            visible=bool((validation_external_model_field.value or "").strip()),
+            content=path_readout(validation_external_model_field, "External model file"),
+        )
         validation_paths_panel = _glass_panel(
             padding=18,
             content=ft.Column(
-                spacing=12,
+                spacing=16,
                 controls=[
-                    ft.Text(
-                        "Validation Setup",
-                        size=14,
-                        weight=ft.FontWeight.W_600,
-                        color=LIQUID_TEXT,
-                    ),
-                    ft.ResponsiveRow(
-                        columns=12,
-                        run_spacing=12,
-                        spacing=12,
-                        controls=[
-                            ft.Container(
-                                col={"xs": 12, "sm": 6, "lg": 4},
-                                padding=14,
-                                border_radius=20,
-                                bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
-                                border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
-                                content=ft.Column(
-                                    spacing=10,
-                                    tight=True,
-                                    controls=[
-                                        ft.Text(
-                                            "Dataset",
-                                            size=14,
-                                            weight=ft.FontWeight.W_600,
-                                            color=LIQUID_TEXT,
-                                        ),
-                                        validation_dataset_field,
-                                        validation_dataset_button,
-                                        validation_polygon_field,
-                                        validation_polygon_button,
-                                    ],
-                                ),
-                            ),
-                            ft.Container(
-                                col={"xs": 12, "sm": 6, "lg": 4},
-                                padding=14,
-                                border_radius=20,
-                                bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
-                                border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
-                                content=ft.Column(
-                                    spacing=10,
-                                    tight=True,
-                                    controls=[
-                                        ft.Text(
-                                            "Model",
-                                            size=14,
-                                            weight=ft.FontWeight.W_600,
-                                            color=LIQUID_TEXT,
-                                        ),
-                                        validation_sensor_dropdown,
-                                        validation_model_dropdown,
-                                        validation_external_model_field,
-                                        ft.Row(
-                                            wrap=True,
-                                            spacing=8,
-                                            controls=[
-                                                validation_external_model_button,
-                                                validation_dropdown_model_button,
-                                            ],
-                                        ),
-                                    ],
-                                ),
-                            ),
-                            ft.Container(
-                                col={"xs": 12, "sm": 6, "lg": 4},
-                                padding=14,
-                                border_radius=20,
-                                bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
-                                border=ft.border.all(1, ft.Colors.with_opacity(0.30, ft.Colors.WHITE)),
-                                content=ft.Column(
-                                    spacing=10,
-                                    tight=True,
-                                    controls=[
-                                        ft.Text(
-                                            "Options + Output",
-                                            size=14,
-                                            weight=ft.FontWeight.W_600,
-                                            color=LIQUID_TEXT,
-                                        ),
-                                        validation_output_dir_field,
-                                        validation_output_button,
-                                        validation_label_column_field,
-                                        validation_mode_dropdown,
-                                        validation_target_class_container,
-                                    ],
-                                ),
-                            ),
-                        ],
-                    ),
+                    ft.Text("Validation setup", size=16, weight=ft.FontWeight.W_700, color=LIQUID_TEXT),
+                    ft.ResponsiveRow(columns=12, spacing=16, run_spacing=16, controls=[
+                        ft.Container(
+                            col={"xs": 12, "md": 6}, padding=16, border_radius=20,
+                            bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
+                            content=ft.Column(spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+                                ft.Text("1  Validation data", size=14, weight=ft.FontWeight.W_600, color=LIQUID_TEXT),
+                                path_readout(validation_dataset_field, "Validation CSV or multiband TIFF"),
+                                ft.Row(controls=[validation_dataset_button]),
+                                validation_polygon_section,
+                                validation_label_column_field,
+                                ft.Text("For a TIFF, select a labelled shapefile and choose the attribute containing its classes. For a CSV, choose its class column.", size=11, color=LIQUID_MUTED),
+                            ]),
+                        ),
+                        ft.Container(
+                            col={"xs": 12, "md": 6}, padding=16, border_radius=20,
+                            bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
+                            content=ft.Column(spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+                                ft.Text("2  Model and class matching", size=14, weight=ft.FontWeight.W_600, color=LIQUID_TEXT),
+                                validation_sensor_dropdown,
+                                validation_model_section,
+                                ft.Row(wrap=True, spacing=8, controls=[
+                                    validation_external_model_button,
+                                    validation_dropdown_model_button,
+                                ]),
+                                validation_external_readout,
+                                ft.Row(spacing=8, controls=[
+                                    validation_mapping_button,
+                                    ft.Text("Match classes", size=12, color=LIQUID_SUBTEXT),
+                                ]),
+                                validation_mapping_status,
+                            ]),
+                        ),
+                        ft.Container(
+                            col={"xs": 12}, padding=16, border_radius=20,
+                            bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
+                            content=ft.Column(spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+                                ft.Text("3  Results", size=14, weight=ft.FontWeight.W_600, color=LIQUID_TEXT),
+                                ft.ResponsiveRow(columns=12, spacing=12, run_spacing=12, controls=[
+                                    ft.Container(col={"xs": 12, "md": 5}, content=ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+                                        path_readout(validation_output_dir_field, "Output folder"),
+                                        ft.Row(controls=[validation_output_button]),
+                                    ])),
+                                    ft.Container(col={"xs": 12, "md": 4}, content=validation_mode_dropdown),
+                                    ft.Container(col={"xs": 12, "md": 3}, content=validation_target_class_container),
+                                ]),
+                            ]),
+                        ),
+                    ]),
                 ],
             ),
         )
@@ -7875,6 +7833,19 @@ def main(page: ft.Page) -> None:
             320,
             min(1400 if compact_layout else 1460, viewport_width - (horizontal_padding * 2) - 10),
         )
+        selector_width = (
+            max(250, content_width - 80) if content_width < 780
+            else min(600, int((content_width - 90) / 2))
+        )
+        for selector in (
+            apply_sensor_dropdown, apply_model_dropdown,
+            training_sensor_dropdown, training_label_field,
+            validation_sensor_dropdown, validation_model_dropdown,
+            validation_label_column_field,
+        ):
+            selector.width = selector_width
+        validation_mode_dropdown.width = min(360, selector_width)
+        validation_target_class_field.width = min(300, selector_width)
         section_spacing = 12 if compact_layout else 16
         panel_padding = 14 if compact_layout else 18
         panel_padding_vertical = 12 if compact_layout else 16
@@ -7908,20 +7879,6 @@ def main(page: ft.Page) -> None:
             train_paths_panel_ref.padding = panel_padding
             if isinstance(train_paths_panel_ref.content, ft.Column):
                 train_paths_panel_ref.content.spacing = 10 if compact_layout else 12
-                if len(train_paths_panel_ref.content.controls) >= 2:
-                    responsive_row = train_paths_panel_ref.content.controls[1]
-                    if isinstance(responsive_row, ft.ResponsiveRow):
-                        train_paths_card_height_dynamic = 465 if training_raster_field.value else 360
-                        for card in responsive_row.controls:
-                            if isinstance(card, ft.Container):
-                                card.height = train_paths_card_height_dynamic
-        if isinstance(train_settings_panel_ref, ft.Container):
-            train_settings_panel_ref.padding = ft.padding.symmetric(
-                horizontal=panel_padding,
-                vertical=panel_padding_vertical,
-            )
-            if isinstance(train_settings_panel_ref.content, ft.Column):
-                train_settings_panel_ref.content.spacing = 10 if compact_layout else 14
 
         if validation_main_content_ref is not None:
             validation_main_content_ref.padding = ft.padding.only(bottom=main_bottom_padding)
@@ -8151,7 +8108,7 @@ def main(page: ft.Page) -> None:
     append_log(apply_log, "Ready. Select inputs and start the apply workflow.")
     append_log(
         train_log,
-        "Ready. Select training CSV files and/or folders containing CSV files to train a new model.",
+        "Ready. Select one training CSV or TIFF, then choose the sensor and model details.",
     )
     append_log(
         validation_log,

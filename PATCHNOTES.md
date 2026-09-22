@@ -1,5 +1,14 @@
 # Patch Notes
 
+## Version 1.0.27 - 2026-09-22
+
+### Changed
+
+- Validation now accepts a CSV or a raw multiband TIFF as its dataset input
+- TIFF validation requests a labelled point or polygon shapefile and its class column
+- Refined the validation data layout and clarified the CSV and TIFF workflow
+- Rebuilt the desktop bundle and installer for version `1.0.27`
+
 ## Version 1.0.26 - 2026-09-22
 
 ### Added

@@ -5,10 +5,10 @@ import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_origin
-from shapely.geometry import box
+from shapely.geometry import Point, box
 
 from ice_creams_feature_modes import FEATURE_MODE_HIGH_SPATIAL_ACCURACY
-from ice_creams_labelled_raster import labelled_raster_dataframe
+from ice_creams_labelled_raster import labelled_raster_dataframe, labelled_point_raster_dataframe
 
 
 def _fixture(tmp_path, *, labels=(1, "water"), descriptions=False, nodata=False):
@@ -88,3 +88,19 @@ def test_band_descriptions_override_file_order(tmp_path):
     )
     assert frame["Reflectance_B02"].eq(4000).all()
     assert frame["Reflectance_B08"].eq(1000).all()
+
+
+def test_validation_points_sample_sentinel_raster_and_skip_nodata(tmp_path):
+    raster, _ = _fixture(tmp_path, descriptions=True, nodata=True)
+    points = tmp_path / "points.shp"
+    gpd.GeoDataFrame(
+        {"class_id": ["missing", "water"]},
+        geometry=[Point(0.5, 1.5), Point(1.5, 1.5)], crs="EPSG:3857",
+    ).to_file(points)
+    frame = labelled_point_raster_dataframe(
+        str(raster), str(points), "class_id",
+        feature_mode=FEATURE_MODE_HIGH_SPATIAL_ACCURACY,
+    )
+    assert list(frame["class_id"]) == ["water"]
+    assert frame["Reflectance_B02"].iloc[0] == pytest.approx(1000)
+    assert frame["NDVI"].notna().all()

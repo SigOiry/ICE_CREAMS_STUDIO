@@ -115,6 +115,59 @@ def test_generic_train_validate_and_apply(tmp_path, monkeypatch):
         assert set(np.unique(result.read(1))) <= {1, 2}
 
 
+def test_validation_accepts_vector_attributes_and_raster_points_with_class_matching(tmp_path):
+    import pandas as pd
+    import torch
+    from shapely.geometry import Point
+
+    from train_icecreams import train_model
+    from validate_icecreams import (
+        model_class_values, validate_model, validation_attribute_columns,
+        validation_class_values,
+    )
+
+    torch.set_num_threads(1)
+    raster, polygons = _sample(tmp_path)
+    model_path = tmp_path / "drone_model.pkl"
+    train_model(
+        training_source=[], output_model=str(model_path), epochs=1,
+        valid_pct=0.25, batch_size=16, feature_mode="generic_raster",
+        raster_path=str(raster), polygon_path=str(polygons), label_column="habitat",
+        sensor_name="Drone",
+    )
+    assert set(model_class_values(str(model_path))) == {"1", "2"}
+    points = tmp_path / "validation_points.shp"
+    gpd.GeoDataFrame(
+        {"class_name": ["left", "right"], "Band_1": [20, 80], "Band_2": [80, 20]},
+        geometry=[Point(2.5, 5.5), Point(5.5, 5.5)], crs="EPSG:3857",
+    ).to_file(points)
+    assert "class_name" in validation_attribute_columns(str(points))
+    assert validation_class_values(str(points), "class_name") == ["left", "right"]
+    mapping = {"left": "1", "right": "2"}
+    direct = validate_model(
+        str(points), str(model_path), "class_name", str(tmp_path / "vector_results"),
+        class_mapping=mapping,
+    )
+    vector_polygons = tmp_path / "validation_polygons.shp"
+    gpd.GeoDataFrame(
+        {"class_name": ["left", "right"], "Band_1": [20, 80], "Band_2": [80, 20]},
+        geometry=[box(0, 0, 4, 8), box(4, 0, 8, 8)], crs="EPSG:3857",
+    ).to_file(vector_polygons)
+    direct_polygons = validate_model(
+        str(vector_polygons), str(model_path), "class_name", str(tmp_path / "polygon_results"),
+        class_mapping=mapping,
+    )
+    sampled = validate_model(
+        str(raster), str(model_path), "class_name", str(tmp_path / "point_results"),
+        polygon_path=str(points), class_mapping=mapping,
+    )
+    for result in (direct, direct_polygons, sampled):
+        assert result["rows"] == 2
+        output = pd.read_csv(result["predictions_csv"])
+        assert list(output["Original_Validation_Class"]) == ["left", "right"]
+        assert list(output["class_name"].astype(str)) == ["1", "2"]
+
+
 def test_generic_cnn_train_validate_and_apply(tmp_path):
     import torch
 
