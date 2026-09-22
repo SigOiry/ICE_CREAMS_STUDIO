@@ -23,7 +23,7 @@ The desktop application is distributed from the hosted UI repository:
 To install the app:
 
 - download the Windows installer directly here:
-  [`ICE_CREAMS_Installer_1_0_25.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_25.exe)
+  [`ICE_CREAMS_Installer_1_0_26.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_26.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu
   after installation
@@ -35,32 +35,46 @@ application.
 Patch notes for the current desktop release are available in
 [`PATCHNOTES.md`](PATCHNOTES.md).
 
-## What's New in 1.0.25
+## What's New in 1.0.26
 
-- Train and validate from a multiband GeoTIFF and labelled polygons
-- Train a Generic Multiband Raster model for drone or other non-Sentinel imagery
-- Apply generic models to compatible rasters with an optional polygon mask
-- Rebuilt the Windows desktop installer for version `1.0.25`
+- Choose a sensor before training, applying, or validating a model; create new sensors with band centre wavelengths
+- Train from a CSV or a multiband GeoTIFF with labelled polygons and a chosen class column
+- Use sensor wavelengths to add NDVI and NDWI when the required bands are available
+- Apply generic raster models faster with larger inference windows and direct tabular prediction
+- Rebuilt the Windows desktop installer for version `1.0.26`
 
 ## Current App Features
 
 ### Training and validation from labelled rasters
 
-The Train and Validation tabs accept a multiband GeoTIFF (`.tif` or `.tiff`)
-paired with labelled polygons (`.shp`, `.gpkg`, or `.geojson`). Enter the polygon
-column containing the class; text and numeric values are supported. Training
-can also combine the extracted pixels with selected CSV files. Validation
-continues to accept CSV and XLSX tables.
+The Train tab takes one CSV or multiband GeoTIFF (`.tif` or `.tiff`). A CSV must
+contain a `True_Class` column. For a TIFF, select labelled polygons (`.shp`,
+`.gpkg`, or `.geojson`), then choose the class column from the attributes shown
+in the dropdown; text and numeric values are supported. Choose the sensor,
+model name, and output folder. Validation accepts raster and polygon pairs as
+well as CSV and XLSX tables.
+
+Choose a sensor before training. Existing models are assigned to **Sentinel-2**.
+For a new sensor, choose **Create new sensor**, enter its name, and provide the
+centre wavelength of each raster band in nanometres, in raster band order. The
+band count must match the training raster. Sensor definitions and model
+assignments are saved in the user's application data folder.
 
 For drone and other non-Sentinel imagery, choose **Generic Multiband Raster**
-in Training. The model learns directly from every raster band without
-Sentinel-2 band names, NDVI, or NDWI. Its exported `.pkl` stores the band count,
-band descriptions when available, feature order, and class vocabulary. Select
-that model in Apply to classify a compatible GeoTIFF, with an optional polygon
+in Training. The model learns from every raster band. When the sensor has
+red and near-infrared bands, NDVI is added as a predictor; when it has green
+and near-infrared bands, NDWI is added as well. Bands are chosen by their
+entered centre wavelengths (green 500–600 nm, red 620–700 nm, near-infrared
+760–900 nm). If a required band is unavailable, that index is omitted. The
+exported `.pkl` stores the sensor and band
+schema, including the index band choices, so Apply and Validation recreate
+the same predictors. Choose the sensor first in Apply or Validation to see only
+its models. Apply can classify a compatible GeoTIFF with an optional polygon
 mask. The output GeoTIFF has class ID and confidence bands, with the ID-to-label
-mapping in its `CLASS_LABELS` metadata. Validation uses the same stored band
-schema with a new raster and labelled polygons. Both tabular and spectral 1D
-CNN methods are supported.
+mapping in its `CLASS_LABELS` metadata. Both tabular and spectral 1D CNN
+methods are supported. Apply reads generic rasters in bounded inference
+windows independent of the TIFF's internal storage blocks, and skips windows
+outside an optional polygon mask.
 
 Raster bands can be identified by Sentinel-2 band descriptions. Without band
 descriptions, a 12-band raster must follow B01, B02, B03, B04, B05, B06, B07,

@@ -27,6 +27,7 @@ from ice_creams_feature_modes import (
     FEATURE_MODE_GENERIC_RASTER,
     DEFAULT_FEATURE_MODE,
     FEATURE_MODE_CHOICES,
+    FEATURE_COLUMNS_BY_MODE,
     build_training_dataframe,
     feature_mode_label,
     normalize_feature_mode,
@@ -47,7 +48,12 @@ from ice_creams_model_families import (
     sequence_channel_feature_names_for_mode,
 )
 from ice_creams_labelled_raster import labelled_raster_dataframe
-from ice_creams_generic_raster import labelled_generic_raster_dataframe, prepare_generic_features
+from ice_creams_generic_raster import (
+    configure_raster_schema_sensor,
+    labelled_generic_raster_dataframe,
+    prepare_generic_features,
+)
+from ice_creams_sensors import SENTINEL_2, assign_model_sensor, load_sensors
 
 
 def _emit_status(status_callback: Callable[[str], None] | None, message: str) -> None:
@@ -170,6 +176,8 @@ def train_model(
     raster_path: str | None = None,
     polygon_path: str | None = None,
     label_column: str = "True_Class",
+    sensor_name: str | None = None,
+    sensor_registry_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     Train a fastai tabular learner from ICE CREAMS CSV training data.
@@ -186,8 +194,18 @@ def train_model(
         raise ValueError("Batch size must be at least 1.")
 
     resolved_feature_mode = normalize_feature_mode(feature_mode)
-    if resolved_feature_mode == FEATURE_MODE_GENERIC_RASTER and not (raster_path and polygon_path):
-        raise ValueError("Generic raster training requires a multiband raster and labelled polygons.")
+    selected_sensor = str(sensor_name or "").strip()
+    if not selected_sensor:
+        raise ValueError("Select a sensor before training a model.")
+    models_dir = Path(sensor_registry_dir) if sensor_registry_dir else Path(_normalise_model_path(output_model)).parent
+    sensors = load_sensors(models_dir)
+    if selected_sensor not in sensors:
+        raise ValueError(f"Unknown sensor: {selected_sensor}")
+    sensor_definition = sensors[selected_sensor]
+    if selected_sensor != SENTINEL_2 and resolved_feature_mode != FEATURE_MODE_GENERIC_RASTER:
+        raise ValueError("Custom sensors require Generic Multiband Raster feature mode.")
+    if resolved_feature_mode == FEATURE_MODE_GENERIC_RASTER and not (raster_path and polygon_path or training_source):
+        raise ValueError("Generic training requires a CSV or a raster with labelled polygons.")
     selected_mode_label = feature_mode_label(resolved_feature_mode)
     resolved_model_family = normalize_model_family(model_family)
     selected_model_family_label = model_family_label(resolved_model_family)
@@ -227,6 +245,9 @@ def train_model(
             raster_frame, generic_raster_schema = labelled_generic_raster_dataframe(
                 raster_path, polygon_path, label_column
             )
+            generic_raster_schema = configure_raster_schema_sensor(
+                generic_raster_schema, sensor_definition
+            )
         else:
             raster_frame = labelled_raster_dataframe(
                 raster_path, polygon_path, label_column, feature_mode=resolved_feature_mode
@@ -241,6 +262,43 @@ def train_model(
     _emit_progress(progress_callback, 0.38)
 
     dep_var = "True_Class"
+    if dep_var not in df_nn:
+        raise ValueError("Training CSV must contain a True_Class column.")
+    if not raster_path and resolved_feature_mode != FEATURE_MODE_GENERIC_RASTER:
+        required = set(FEATURE_COLUMNS_BY_MODE[resolved_feature_mode])
+        if not required.issubset(df_nn.columns):
+            matching_modes = [
+                mode for mode in FEATURE_MODE_CHOICES
+                if set(FEATURE_COLUMNS_BY_MODE[mode]).issubset(df_nn.columns)
+            ]
+            resolved_feature_mode = (
+                max(matching_modes, key=lambda mode: len(FEATURE_COLUMNS_BY_MODE[mode]))
+                if matching_modes else FEATURE_MODE_GENERIC_RASTER
+            )
+            selected_mode_label = feature_mode_label(resolved_feature_mode)
+    if not raster_path and resolved_feature_mode == FEATURE_MODE_GENERIC_RASTER:
+        band_names = [f"Band_{index}" for index in range(1, len(sensor_definition["bands"]) + 1)]
+        if all(name in df_nn.columns for name in band_names):
+            source_columns = band_names
+        else:
+            excluded = {dep_var, "NDVI", "NDWI", "Pixel_Row", "Pixel_Col", "Pixel_X", "Pixel_Y"}
+            source_columns = [
+                column for column in df_nn.columns
+                if column not in excluded and pd.api.types.is_numeric_dtype(df_nn[column])
+            ]
+        if len(source_columns) != len(band_names):
+            raise ValueError(
+                f"Sensor '{selected_sensor}' has {len(band_names)} bands; "
+                f"the CSV must contain that many numeric band columns plus True_Class."
+            )
+        band_frame = df_nn.loc[:, source_columns].copy()
+        band_frame.columns = band_names
+        df_nn = pd.concat([df_nn[[dep_var]].copy(), band_frame], axis=1)
+        generic_raster_schema = configure_raster_schema_sensor(
+            {"band_count": len(band_names), "band_descriptions": [], "feature_names": band_names},
+            sensor_definition,
+        )
+        generic_raster_schema["csv_band_columns"] = source_columns
     learn: Learner
     n_classes: int
     feature_columns: list[str]
@@ -255,6 +313,11 @@ def train_model(
         _emit_status(status_callback, f"Preparing {selected_mode_label} spectral sequences")
         if generic_raster_schema:
             raw_names = list(generic_raster_schema["feature_names"])
+            index_bands = generic_raster_schema.get("index_bands") or {}
+            if index_bands.get("nir") and index_bands.get("red"):
+                raw_names.append("NDVI")
+            if index_bands.get("nir") and index_bands.get("green"):
+                raw_names.append("NDWI")
             sequence_channel_feature_names = [raw_names]
             if spectral_cnn_use_standardized_reflectance:
                 sequence_channel_feature_names.append([f"{name}_Standardized" for name in raw_names])
@@ -326,6 +389,8 @@ def train_model(
             sequence_channel_feature_names=sequence_channel_feature_names,
             sequence_normalization=sequence_normalization,
             raster_schema=generic_raster_schema,
+            sensor_name=selected_sensor,
+            sensor_definition=sensor_definition,
         )
         _emit_progress(progress_callback, 0.56)
 
@@ -344,8 +409,8 @@ def train_model(
     else:
         _emit_status(status_callback, f"Preparing {selected_mode_label} training features")
         if generic_raster_schema:
-            feature_columns = list(generic_raster_schema["feature_names"])
             prepared = prepare_generic_features(df_nn, generic_raster_schema)
+            feature_columns = list(prepared.columns)
             df_nn = pd.concat([df_nn[[dep_var]].copy(), prepared], axis=1)
         else:
             df_nn, feature_columns, resolved_feature_mode = build_training_dataframe(
@@ -378,6 +443,8 @@ def train_model(
             feature_mode=resolved_feature_mode,
             required_feature_names=feature_columns,
             raster_schema=generic_raster_schema,
+            sensor_name=selected_sensor,
+            sensor_definition=sensor_definition,
         )
         _emit_progress(progress_callback, 0.56)
 
@@ -405,11 +472,13 @@ def train_model(
 
     _emit_status(status_callback, f"Exporting model to {output_path}")
     learn.export(str(output_path))
+    assign_model_sensor(models_dir, output_path, selected_sensor)
     _emit_progress(progress_callback, 1.0)
     _emit_status(status_callback, f"Completed. Model saved to {output_path}")
 
     return {
         "model_path": str(output_path),
+        "sensor_name": selected_sensor,
         "rows": int(len(df_nn)),
         "csv_files": int(len(csv_files)),
         "raster_files": int(bool(raster_path)),
@@ -485,6 +554,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raster", help="Multiband GeoTIFF paired with --polygons")
     parser.add_argument("--polygons", help="Labelled polygon file paired with --raster")
     parser.add_argument("--label-column", default="True_Class", help="Class attribute in the polygons")
+    parser.add_argument("--sensor", default=SENTINEL_2, help="Registered sensor name")
     return parser
 
 
@@ -502,6 +572,7 @@ if __name__ == "__main__":
         raster_path=args.raster,
         polygon_path=args.polygons,
         label_column=args.label_column,
+        sensor_name=args.sensor,
         status_callback=print,
     )
     print(f"Validation accuracy: {result['accuracy']}")

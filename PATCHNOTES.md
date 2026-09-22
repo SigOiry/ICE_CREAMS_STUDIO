@@ -1,5 +1,20 @@
 # Patch Notes
 
+## Version 1.0.26 - 2026-09-22
+
+### Added
+
+- Associate models with a sensor and filter model selection by sensor in Apply and Validation
+- Create sensors by entering their name and the centre wavelength of each raster band
+- Derive NDVI and NDWI from the sensor's red, green, and near-infrared bands when available
+
+### Changed
+
+- Simplified Train input to one CSV or GeoTIFF field; GeoTIFF training asks for labelled polygons and their class column
+- Require a sensor before training and store its definition with new model exports
+- Apply generic raster models in larger windows and use direct tabular prediction for compatible models
+- Rebuilt the desktop bundle and installer for version `1.0.26`
+
 ## Version 1.0.25 - 2026-09-21
 
 ### Added

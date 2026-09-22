@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,6 +15,19 @@ import rasterio
 from rasterio.features import rasterize
 from rasterio.windows import Window, bounds as window_bounds, from_bounds, transform as window_transform
 from shapely.geometry import box
+
+from ice_creams_sensors import index_band_names
+
+
+def polygon_attribute_columns(path: str) -> list[str]:
+    """Read polygon attribute names without loading the full training layer."""
+    vector = gpd.read_file(path, rows=1)
+    if vector.geometry.name not in vector.columns:
+        raise ValueError("The selected file has no geometry column.")
+    columns = [str(name) for name in vector.columns if name != vector.geometry.name]
+    if not columns:
+        raise ValueError("The polygon file has no attribute columns.")
+    return columns
 
 
 def raster_schema(raster: rasterio.io.DatasetReader) -> dict[str, Any]:
@@ -44,19 +59,62 @@ def matching_band_indices(raster: rasterio.io.DatasetReader, schema: dict[str, A
 
 def prepare_generic_features(frame: pd.DataFrame, schema: dict[str, Any], *, standardized: bool = False) -> pd.DataFrame:
     names = list(schema["feature_names"])
+    csv_columns = list(schema.get("csv_band_columns") or [])
+    if any(name not in frame.columns for name in names) and len(csv_columns) == len(names):
+        if all(column in frame.columns for column in csv_columns):
+            frame = frame.rename(columns=dict(zip(csv_columns, names)))
     missing = [name for name in names if name not in frame.columns]
     if missing:
         raise ValueError(f"Missing raster features: {', '.join(missing)}")
     values = frame.loc[:, names].apply(pd.to_numeric, errors="coerce")
     if not np.isfinite(values.to_numpy()).all():
         raise ValueError("Raster features contain missing or nonfinite values.")
+    index_bands = schema.get("index_bands") or {}
+    indices = pd.DataFrame(index=values.index)
+    nir_name = index_bands.get("nir")
+    for index_name, other_name, reverse in (
+        ("NDVI", index_bands.get("red"), False),
+        ("NDWI", index_bands.get("green"), True),
+    ):
+        if nir_name and other_name:
+            nir = values[nir_name]
+            other = values[other_name]
+            denominator = nir + other
+            numerator = other - nir if reverse else nir - other
+            indices[index_name] = numerator.div(denominator.where(denominator.ne(0), 1)).where(
+                denominator.ne(0), 0.0
+            )
     if not standardized:
-        return values
+        return pd.concat([values, indices], axis=1)
     row_min = values.min(axis=1)
     row_range = values.max(axis=1) - row_min
     standardized_values = values.sub(row_min, axis=0).div(row_range.where(row_range.gt(0), 1), axis=0)
     standardized_values.columns = [f"{name}_Standardized" for name in names]
-    return pd.concat([values, standardized_values], axis=1)
+    standardized_indices = indices.rename(columns={name: f"{name}_Standardized" for name in indices})
+    return pd.concat([values, indices, standardized_values, standardized_indices], axis=1)
+
+
+def configure_raster_schema_sensor(schema: dict[str, Any], sensor: dict[str, Any]) -> dict[str, Any]:
+    """Bind generic raster bands and derived indices to the selected sensor."""
+    bands = sensor.get("bands") or {}
+    names = list(schema["feature_names"])
+    if len(bands) != len(names):
+        raise ValueError(
+            f"Sensor '{sensor.get('name', '')}' defines {len(bands)} bands, "
+            f"but the training raster has {len(names)} bands."
+        )
+    descriptions = list(schema.get("band_descriptions") or [])
+    ordered_wavelengths = (
+        [bands[description] for description in descriptions]
+        if len(descriptions) == len(names) and set(descriptions) == set(bands)
+        else list(bands.values())
+    )
+    matched = index_band_names({name: wavelength for name, wavelength in zip(names, ordered_wavelengths)})
+    result = dict(schema)
+    result["sensor_name"] = sensor["name"]
+    result["band_wavelengths_nm"] = ordered_wavelengths
+    result["index_bands"] = matched
+    return result
 
 
 def labelled_generic_raster_dataframe(
@@ -172,50 +230,90 @@ def classify_generic_raster(
         raise ValueError("Generic raster models can only be applied to GeoTIFF images.")
     with rasterio.open(source) as raster:
         indices = matching_band_indices(raster, schema)
-        mask_geometries = None
+        mask_vector = None
+        mask_index = None
         if mask_polygon_path:
             mask_vector = gpd.read_file(mask_polygon_path)
             if mask_vector.empty or mask_vector.crs is None or raster.crs is None:
                 raise ValueError("The apply mask and raster must have CRS information and valid features.")
-            mask_geometries = list(mask_vector.to_crs(raster.crs).geometry)
+            mask_vector = mask_vector.to_crs(raster.crs)
+            mask_index = mask_vector.sindex
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         profile = raster.profile.copy()
-        profile.update(driver="GTiff", count=2, dtype="float32", nodata=-1, compress="deflate")
+        profile.pop("photometric", None)
+        profile.pop("nbits", None)
+        profile.update(
+            driver="GTiff", count=2, dtype="float32", nodata=-1,
+            compress="deflate", tiled=True, blockxsize=256, blockysize=256,
+        )
         vocab = [str(value) for value in learner.dls.vocab]
-        windows = list(raster.block_windows(1))
+        # Raster storage blocks can be only a few rows tall. Running fastai on
+        # each such block repeatedly rebuilds its test data loader. Use larger,
+        # bounded inference windows regardless of the TIFF's internal layout.
+        tile_size = min(512, max(128, int(math.sqrt(4_000_000 / max(raster.count, 1)))))
+        total_windows = math.ceil(raster.width / tile_size) * math.ceil(raster.height / tile_size)
+        completed_windows = 0
+        last_status_time = time.monotonic()
+        if status_callback:
+            status_callback(f"Classifying raster in {total_windows} inference windows")
         with rasterio.open(output, "w", **profile) as dst:
             dst.set_band_description(1, "Predicted_Class_ID")
             dst.set_band_description(2, "Predicted_Confidence")
             dst.update_tags(CLASS_LABELS=json.dumps({index + 1: name for index, name in enumerate(vocab)}))
-            for position, (_, window) in enumerate(windows, start=1):
-                values = np.ma.filled(raster.read(indices, window=window, masked=True).astype(np.float32), np.nan)
-                valid = np.isfinite(values).all(axis=0)
-                if mask_geometries is not None:
-                    mask = rasterize(((geometry, 1) for geometry in mask_geometries),
-                                     out_shape=valid.shape,
-                                     transform=window_transform(window, raster.transform),
-                                     dtype="uint8").astype(bool)
-                    valid &= mask
-                classes = np.full(valid.shape, -1, dtype=np.float32)
-                confidence = np.full(valid.shape, -1, dtype=np.float32)
-                if valid.any():
-                    rows, cols = np.nonzero(valid)
-                    frame = pd.DataFrame({name: band_values for name, band_values
-                                          in zip(schema["feature_names"], values[:, rows, cols])})
-                    frame = prepare_generic_features(
-                        frame, schema,
-                        standardized=bool(model_metadata.get("sequence_use_standardized_reflectance")),
+            for row_off in range(0, raster.height, tile_size):
+                for col_off in range(0, raster.width, tile_size):
+                    window = Window(
+                        col_off, row_off,
+                        min(tile_size, raster.width - col_off),
+                        min(tile_size, raster.height - row_off),
                     )
-                    probabilities = predict_model_probabilities(
-                        learner, frame, model_metadata, batch_size=4096
-                    )
-                    classes[rows, cols] = probabilities.argmax(dim=1).cpu().numpy() + 1
-                    confidence[rows, cols] = probabilities.max(dim=1).values.cpu().numpy()
-                dst.write(classes, 1, window=window)
-                dst.write(confidence, 2, window=window)
-                if progress_callback:
-                    progress_callback(position / len(windows))
-                if status_callback and (position == len(windows) or position % 20 == 0):
-                    status_callback(f"Classified {position}/{len(windows)} raster tiles")
+                    shape = (int(window.height), int(window.width))
+                    classes = np.full(shape, -1, dtype=np.float32)
+                    confidence = np.full(shape, -1, dtype=np.float32)
+                    mask = None
+                    if mask_vector is not None:
+                        matches = mask_index.query(
+                            box(*window_bounds(window, raster.transform)), predicate="intersects"
+                        )
+                        if len(matches):
+                            mask = rasterize(
+                                ((geometry, 1) for geometry in mask_vector.iloc[matches].geometry),
+                                out_shape=shape,
+                                transform=window_transform(window, raster.transform),
+                                dtype="uint8",
+                            ).astype(bool)
+                        else:
+                            mask = np.zeros(shape, dtype=bool)
+                    if mask is None or mask.any():
+                        values = np.ma.filled(
+                            raster.read(indices, window=window, masked=True).astype(np.float32), np.nan
+                        )
+                        valid = np.isfinite(values).all(axis=0)
+                        if mask is not None:
+                            valid &= mask
+                        if valid.any():
+                            rows, cols = np.nonzero(valid)
+                            frame = pd.DataFrame({
+                                name: band_values
+                                for name, band_values in zip(schema["feature_names"], values[:, rows, cols])
+                            })
+                            frame = prepare_generic_features(
+                                frame, schema,
+                                standardized=bool(model_metadata.get("sequence_use_standardized_reflectance")),
+                            )
+                            probabilities = predict_model_probabilities(
+                                learner, frame, model_metadata, batch_size=65536
+                            )
+                            classes[rows, cols] = probabilities.argmax(dim=1).cpu().numpy() + 1
+                            confidence[rows, cols] = probabilities.max(dim=1).values.cpu().numpy()
+                    dst.write(classes, 1, window=window)
+                    dst.write(confidence, 2, window=window)
+                    completed_windows += 1
+                    if progress_callback:
+                        progress_callback(completed_windows / total_windows)
+                    now = time.monotonic()
+                    if status_callback and (completed_windows == total_windows or now - last_status_time >= 5):
+                        status_callback(f"Classified {completed_windows}/{total_windows} raster windows")
+                        last_status_time = now
     return str(output)

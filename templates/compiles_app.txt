@@ -159,6 +159,7 @@ if (-not $gdalPlugins) { throw "Could not find GDAL plugins directory (gdalplugi
   --add-data "$projData;proj_data" `
   --add-data "$gdalPlugins;gdalplugins" `
   -y
+if ($LASTEXITCODE -ne 0) { throw "Desktop bundle build failed with exit code $LASTEXITCODE" }
 
 $distRoot = Join-Path "dist" $appName
 $exePath = Join-Path $distRoot "$appName.exe"

@@ -12,6 +12,7 @@ from fastai.data.core import DataLoaders
 from fastai.learner import Learner
 from fastai.losses import CrossEntropyLossFlat
 from fastai.metrics import accuracy
+from fastai.tabular.model import TabularModel
 from torch import nn
 from torch.utils.data import Dataset
 
@@ -410,6 +411,8 @@ def attach_model_metadata(
     sequence_channel_feature_names: Any | None = None,
     sequence_normalization: dict[str, Any] | None = None,
     raster_schema: dict[str, Any] | None = None,
+    sensor_name: str | None = None,
+    sensor_definition: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Attach normalized ICE CREAMS model metadata to an exported learner."""
     resolved_model_family = normalize_model_family(model_family)
@@ -428,6 +431,8 @@ def attach_model_metadata(
         "sequence_input_label": "",
         "sequence_normalization": {},
         "raster_schema": raster_schema or {},
+        "sensor_name": sensor_name or "Sentinel-2",
+        "sensor_definition": sensor_definition or {},
     }
 
     if resolved_model_family == MODEL_FAMILY_SPECTRAL_1D_CNN:
@@ -559,6 +564,8 @@ def extract_model_metadata(learner: Any) -> dict[str, Any]:
             ),
             "sequence_normalization": sequence_normalization,
             "raster_schema": explicit_metadata.get("raster_schema") or {},
+            "sensor_name": explicit_metadata.get("sensor_name") or "Sentinel-2",
+            "sensor_definition": explicit_metadata.get("sensor_definition") or {},
         }
 
     required_feature_names = extract_learner_required_feature_names(learner)
@@ -574,6 +581,8 @@ def extract_model_metadata(learner: Any) -> dict[str, Any]:
         "sequence_use_standardized_reflectance": False,
         "sequence_input_label": "",
         "sequence_normalization": {},
+        "sensor_name": "Sentinel-2",
+        "sensor_definition": {},
     }
 
 
@@ -589,6 +598,38 @@ def predict_model_probabilities(
     inference_batch_size = max(1, int(batch_size))
 
     if resolved_model_family == MODEL_FAMILY_TABULAR_DENSE:
+        required_names = _normalise_name_list(model_metadata.get("required_feature_names"))
+        train_ds = getattr(learner.dls, "train_ds", None)
+        processors = getattr(train_ds, "procs", ()) or ()
+        supported_processors = all(
+            type(processor).__name__ in {"FillMissing", "Categorize"}
+            and (type(processor).__name__ != "FillMissing" or not getattr(processor, "na_dict", {}))
+            for processor in processors
+        )
+        # Generic raster training uses only finite continuous features. These
+        # guards let existing compatible exports skip fastai's per-batch loader.
+        if (
+            model_metadata.get("feature_mode") == FEATURE_MODE_GENERIC_RASTER
+            and isinstance(learner.model, TabularModel)
+            and not learner.dls.cat_names
+            and list(learner.dls.cont_names) == required_names
+            and supported_processors
+        ):
+            values = model_input_frame.loc[:, required_names].to_numpy(dtype=np.float32, copy=True)
+            if np.isfinite(values).all():
+                first_param = next(learner.model.parameters(), None)
+                device = first_param.device if first_param is not None else torch.device("cpu")
+                continuous = torch.from_numpy(values)
+                probability_batches: list[torch.Tensor] = []
+                learner.model.eval()
+                with torch.inference_mode():
+                    for start in range(0, len(continuous), inference_batch_size):
+                        batch = continuous[start : start + inference_batch_size].to(device)
+                        categorical = torch.empty((len(batch), 0), dtype=torch.long, device=device)
+                        probability_batches.append(torch.softmax(learner.model(categorical, batch), dim=1).cpu())
+                if probability_batches:
+                    return torch.cat(probability_batches, dim=0)
+                return torch.empty((0, len(learner.dls.vocab)), dtype=torch.float32)
         test_dl = learner.dls.test_dl(model_input_frame, bs=inference_batch_size)
         preds, _ = learner.get_preds(dl=test_dl)
         return preds

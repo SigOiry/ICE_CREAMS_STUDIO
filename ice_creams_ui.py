@@ -57,6 +57,15 @@ from ice_creams_model_families import (
     spectral_cnn_sequence_input_label,
 )
 from ice_creams_specialist_models import is_class45_specialist_model_path
+from ice_creams_generic_raster import polygon_attribute_columns
+from ice_creams_sensors import (
+    SENTINEL_2,
+    bootstrap_existing_models,
+    create_sensor,
+    load_model_sensors,
+    load_sensors,
+    model_sensor,
+)
 
 # Keep terminal output clean on current Flet versions.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -68,7 +77,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.25"
+APP_VERSION = "1.0.26"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"
@@ -658,6 +667,8 @@ def main(page: ft.Page) -> None:
     default_validation_source = PROJECT_ROOT / "Data" / "Input" / "Validation"
     default_validation_output_dir = PROJECT_ROOT / "outputs"
     default_models_dir = PROJECT_ROOT / "models"
+    bootstrap_existing_models(default_models_dir)
+    available_sensors = load_sensors(default_models_dir)
     about_assets_dir = PROJECT_ROOT / "about"
     about_icons_dir = PROJECT_ROOT / "icons"
     existing_models = (
@@ -670,18 +681,6 @@ def main(page: ft.Page) -> None:
         else []
     )
 
-    def _normalise_model_name(name: str) -> str:
-        return "".join(ch for ch in name.lower() if ch.isalnum())
-
-    preferred_model_key = _normalise_model_name("ICE_CREAMS_V1.3.0")
-    default_apply_model = next(
-        (
-            model_path
-            for model_path in existing_models
-            if _normalise_model_name(model_path.stem) == preferred_model_key
-        ),
-        existing_models[0] if existing_models else None,
-    )
     about_info_path = about_assets_dir / "Info.txt"
     about_info_text = ""
     try:
@@ -1000,16 +999,21 @@ def main(page: ft.Page) -> None:
         height=56,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
     )
+    def sensor_options() -> list[ft.dropdown.Option]:
+        return [
+            *(ft.dropdown.Option(key=name, text=name) for name in sorted(available_sensors)),
+            ft.dropdown.Option(key="__create_sensor__", text="+ Create new sensor…"),
+        ]
+
+    apply_sensor_dropdown = ft.Dropdown(
+        label="Sensor", options=sensor_options(), hint_text="Choose a sensor first",
+        border_radius=18, filled=True, fill_color=LIQUID_SURFACE_ALT,
+    )
     apply_model_dropdown = ft.Dropdown(
-        value=str(default_apply_model) if default_apply_model else None,
-        options=[
-            ft.dropdown.Option(
-                key=str(model_path),
-                text=model_path.name,
-            )
-            for model_path in existing_models
-        ],
-        hint_text="Select a FastAI model from the models folder",
+        value=None,
+        options=[],
+        disabled=True,
+        hint_text="Choose a model for the selected sensor",
         enable_search=True,
         border_radius=18,
         filled=True,
@@ -1577,7 +1581,7 @@ def main(page: ft.Page) -> None:
 
     training_source_field = ft.TextField(
         value="",
-        hint_text="Select one or more training CSV files",
+        hint_text="Select a training CSV or multiband TIFF",
         read_only=True,
         border_radius=18,
         filled=True,
@@ -1591,7 +1595,7 @@ def main(page: ft.Page) -> None:
     )
     training_output_dir_field = ft.TextField(
         value=str(default_models_dir),
-        hint_text="New models are saved automatically to the default models folder",
+        hint_text="Select where the trained model will be saved",
         read_only=True,
         border_radius=18,
         filled=True,
@@ -1614,6 +1618,10 @@ def main(page: ft.Page) -> None:
         color=LIQUID_TEXT,
         text_size=14,
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
+    )
+    training_sensor_dropdown = ft.Dropdown(
+        label="Sensor", options=sensor_options(), hint_text="Choose a sensor before training",
+        border_radius=18, filled=True, fill_color=LIQUID_SURFACE_ALT,
     )
     training_epochs_field = ft.TextField(
         value="20",
@@ -1702,7 +1710,7 @@ def main(page: ft.Page) -> None:
         visible=False,
     )
     train_status = ft.Text(
-        "Select training CSV files and/or folders containing CSV files to begin.",
+        "Select one training CSV or multiband TIFF to begin.",
         size=13,
         color=LIQUID_SUBTEXT,
     )
@@ -1729,18 +1737,21 @@ def main(page: ft.Page) -> None:
     )
     training_raster_field = ft.TextField(label="Training raster", read_only=True)
     training_polygon_field = ft.TextField(label="Labelled polygons", read_only=True)
-    training_label_field = ft.TextField(label="Polygon class column", value="True_Class")
+    training_label_field = ft.Dropdown(
+        label="Polygon class column",
+        hint_text="Select the attribute containing class labels",
+        options=[],
+    )
     validation_polygon_field = ft.TextField(label="Labelled polygons for raster validation", read_only=True)
+    validation_sensor_dropdown = ft.Dropdown(
+        label="Sensor", options=sensor_options(), hint_text="Choose a sensor first",
+        border_radius=18, filled=True, fill_color=LIQUID_SURFACE_ALT,
+    )
     validation_model_dropdown = ft.Dropdown(
-        value=str(default_apply_model) if default_apply_model else None,
-        options=[
-            ft.dropdown.Option(
-                key=str(model_path),
-                text=model_path.name,
-            )
-            for model_path in existing_models
-        ],
-        hint_text="Select a FastAI model from the models folder",
+        value=None,
+        options=[],
+        disabled=True,
+        hint_text="Choose a model for the selected sensor",
         enable_search=True,
         border_radius=18,
         filled=True,
@@ -1767,77 +1778,168 @@ def main(page: ft.Page) -> None:
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
     )
 
-    def _select_default_model(model_paths: list[Path]) -> Path | None:
-        return next(
-            (
-                model_path
-                for model_path in model_paths
-                if _normalise_model_name(model_path.stem) == preferred_model_key
-            ),
-            model_paths[0] if model_paths else None,
-        )
-
     def refresh_model_dropdowns(
         preferred_model_path: str | None = None,
         refresh: bool = True,
     ) -> None:
-        nonlocal existing_models, default_apply_model
+        nonlocal existing_models
 
-        existing_models = (
-            [
-                model_path
-                for model_path in sorted(default_models_dir.rglob("*.pkl"))
-                if not is_class45_specialist_model_path(model_path)
+        model_assignments = load_model_sensors(default_models_dir)
+        registered_paths = [
+            Path(key) if Path(key).is_absolute() else default_models_dir / key
+            for key in model_assignments
+        ]
+        existing_models = sorted({
+            *default_models_dir.rglob("*.pkl"), *registered_paths
+        }) if default_models_dir.exists() else sorted(set(registered_paths))
+        existing_models = [
+            path for path in existing_models
+            if path.is_file() and not is_class45_specialist_model_path(path)
+        ]
+        for sensor_dropdown, model_dropdown in (
+            (apply_sensor_dropdown, apply_model_dropdown),
+            (validation_sensor_dropdown, validation_model_dropdown),
+        ):
+            sensor = (sensor_dropdown.value or "").strip()
+            matching = [
+                path for path in existing_models
+                if model_sensor(default_models_dir, path) == sensor
+            ] if sensor in available_sensors else []
+            model_dropdown.options = [
+                ft.dropdown.Option(key=str(path), text=path.name) for path in matching
             ]
-            if default_models_dir.exists()
-            else []
-        )
-        default_apply_model = _select_default_model(existing_models)
-
-        option_payloads = [
-            {
-                "key": str(model_path),
-                "text": model_path.name,
-            }
-            for model_path in existing_models
-        ]
-        apply_model_dropdown.options = [
-            ft.dropdown.Option(key=item["key"], text=item["text"])
-            for item in option_payloads
-        ]
-        validation_model_dropdown.options = [
-            ft.dropdown.Option(key=item["key"], text=item["text"])
-            for item in option_payloads
-        ]
-
-        preferred_value = ""
-        if preferred_model_path:
-            preferred_candidate = Path(preferred_model_path)
-            if preferred_candidate.exists():
-                preferred_value = str(preferred_candidate.resolve())
-
-        available_values = {str(model_path) for model_path in existing_models}
-
-        def _resolve_dropdown_value(current_value: str | None, *, allow_preferred: bool) -> str | None:
-            if allow_preferred and preferred_value and preferred_value in available_values:
-                return preferred_value
-            normalized_current = (current_value or "").strip()
-            if normalized_current and normalized_current in available_values:
-                return normalized_current
-            return str(default_apply_model) if default_apply_model else None
-
-        apply_model_dropdown.value = _resolve_dropdown_value(apply_model_dropdown.value, allow_preferred=True)
-        if not (validation_external_model_field.value or "").strip():
-            validation_model_dropdown.value = _resolve_dropdown_value(
-                validation_model_dropdown.value,
-                allow_preferred=True,
+            model_dropdown.disabled = not bool(sensor)
+            valid_values = {str(path) for path in matching}
+            current = (model_dropdown.value or "").strip()
+            preferred = str(Path(preferred_model_path).resolve()) if preferred_model_path else ""
+            model_dropdown.value = (
+                preferred if preferred in valid_values else
+                current if current in valid_values else None
             )
+        validation_external_model_button.disabled = not bool(validation_sensor_dropdown.value)
+        train_run_button.disabled = not bool(training_sensor_dropdown.value)
+        train_run_button.tooltip = (
+            "Run training (Ctrl+Enter on Train tab)"
+            if training_sensor_dropdown.value else "Choose a sensor before training."
+        )
 
         if refresh:
             refresh_apply_preview()
             refresh_apply_run_button_state()
             refresh_validation_preview()
             request_ui_refresh(force=True)
+
+    def open_create_sensor_dialog(target: ft.Dropdown) -> None:
+        band_count = 4
+        raster_value = (training_raster_field.value or "").strip()
+        if raster_value:
+            try:
+                import rasterio
+                with rasterio.open(raster_value) as raster:
+                    band_count = raster.count
+            except Exception:
+                pass
+        name_field = ft.TextField(label="Sensor name", hint_text="e.g. My drone camera")
+        count_field = ft.TextField(label="Number of raster bands", value=str(band_count))
+        bands_column = ft.Column(spacing=8)
+        error_text = ft.Text("", color="#B23B4D", size=12)
+        wavelength_fields: list[ft.TextField] = []
+
+        def rebuild_band_fields(_: ft.ControlEvent | None = None) -> None:
+            previous = [field.value for field in wavelength_fields]
+            try:
+                count = int((count_field.value or "").strip())
+            except ValueError:
+                count = 0
+            if not 1 <= count <= 512:
+                error_text.value = "Enter a band count between 1 and 512."
+                bands_column.controls = []
+                wavelength_fields.clear()
+                page.update()
+                return
+            error_text.value = ""
+            wavelength_fields[:] = [
+                ft.TextField(
+                    label=f"Band {index} centre wavelength (nm)",
+                    value=previous[index - 1] if index <= len(previous) else "",
+                    hint_text="e.g. 665",
+                ) for index in range(1, count + 1)
+            ]
+            bands_column.controls = wavelength_fields
+            page.update()
+
+        def save_sensor(_: ft.ControlEvent) -> None:
+            try:
+                values = [float((field.value or "").strip()) for field in wavelength_fields]
+                definition = create_sensor(default_models_dir, name_field.value or "", values)
+            except (ValueError, OSError) as exc:
+                error_text.value = str(exc) or "Enter every band centre wavelength in nm."
+                page.update()
+                return
+            available_sensors[definition["name"]] = definition
+            for dropdown in (apply_sensor_dropdown, training_sensor_dropdown, validation_sensor_dropdown):
+                dropdown.options = sensor_options()
+            target.value = definition["name"]
+            if target is training_sensor_dropdown:
+                training_mode_dropdown.value = FEATURE_MODE_GENERIC_RASTER
+            page.pop_dialog()
+            refresh_model_dropdowns(refresh=False)
+            request_ui_refresh(force=True)
+
+        count_field.on_change = rebuild_band_fields
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Create sensor"),
+            content=ft.Column(
+                width=420, height=360, scroll=ft.ScrollMode.AUTO,
+                controls=[
+                    ft.Text(
+                        "Enter bands in raster order, in nm. NDVI/NDWI use green (500–600), "
+                        "red (620–700), and NIR (760–900 nm) bands when available.",
+                        size=12,
+                    ),
+                    name_field, count_field, error_text, bands_column,
+                ],
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=lambda _: page.pop_dialog()),
+                ft.ElevatedButton("Create sensor", on_click=save_sensor),
+            ],
+        )
+        page.show_dialog(dialog)
+        rebuild_band_fields()
+
+    def on_sensor_select(target: ft.Dropdown) -> None:
+        if target.value == "__create_sensor__":
+            target.value = None
+            if target is apply_sensor_dropdown:
+                apply_model_dropdown.value = None
+                _reset_apply_preflight_state()
+            elif target is validation_sensor_dropdown:
+                validation_model_dropdown.value = None
+                validation_external_model_field.value = ""
+            refresh_model_dropdowns(refresh=False)
+            open_create_sensor_dialog(target)
+            return
+        if target is training_sensor_dropdown:
+            training_mode_dropdown.value = (
+                DEFAULT_FEATURE_MODE
+                if target.value == SENTINEL_2 and not training_raster_field.value
+                else FEATURE_MODE_GENERIC_RASTER
+            )
+        if target is apply_sensor_dropdown:
+            apply_model_dropdown.value = None
+            _reset_apply_preflight_state()
+        elif target is validation_sensor_dropdown:
+            validation_model_dropdown.value = None
+            validation_external_model_field.value = ""
+        refresh_model_dropdowns(refresh=False)
+        if target is apply_sensor_dropdown:
+            refresh_apply_preview()
+            refresh_apply_run_button_state()
+        elif target is validation_sensor_dropdown:
+            refresh_validation_preview()
+        request_ui_refresh(force=True)
     validation_label_column_field = ft.TextField(
         value="Label_Char",
         hint_text="Ground-truth label column name",
@@ -2211,7 +2313,8 @@ def main(page: ft.Page) -> None:
             return ""
         if not model_name.lower().endswith(".pkl"):
             model_name = f"{model_name}.pkl"
-        return str(default_models_dir / model_name)
+        output_dir = (training_output_dir_field.value or "").strip()
+        return str(Path(output_dir) / model_name) if output_dir else ""
 
     def _derive_validation_dataset_stem(dataset_value: str | None = None) -> str:
         dataset_input = (dataset_value or validation_dataset_field.value).strip()
@@ -2409,6 +2512,7 @@ def main(page: ft.Page) -> None:
         return (
             not state["busy"]
             and not bool(apply_preflight_state["running"])
+            and bool((apply_sensor_dropdown.value or "").strip())
             and bool(apply_safe_field.value.strip())
             and bool(apply_output_path_field.value.strip())
             and bool((apply_model_dropdown.value or "").strip())
@@ -2422,6 +2526,9 @@ def main(page: ft.Page) -> None:
             return
         if apply_preflight_state["running"]:
             apply_run_button.tooltip = "Checking already processed outputs for the selected scenes."
+            return
+        if not (apply_sensor_dropdown.value or "").strip():
+            apply_run_button.tooltip = "Choose a sensor first."
             return
         if not apply_safe_field.value.strip():
             apply_run_button.tooltip = "Choose an input scene or batch folder."
@@ -4250,6 +4357,10 @@ def main(page: ft.Page) -> None:
             except NameError:
                 pass
             try:
+                refresh_model_dropdowns(refresh=False)
+            except NameError:
+                pass
+            try:
                 sync_validation_mode_controls(refresh=False)
             except NameError:
                 pass
@@ -4506,44 +4617,58 @@ def main(page: ft.Page) -> None:
         )
         request_ui_refresh()
 
+    def sync_training_input_ui() -> None:
+        is_raster = bool((training_raster_field.value or "").strip())
+        if training_polygon_section is not None:
+            training_polygon_section.visible = is_raster
+        if train_settings_panel_ref is not None:
+            train_settings_panel_ref.visible = is_raster
+        if train_paths_panel_ref is not None and isinstance(train_paths_panel_ref.content, ft.Column):
+            row = train_paths_panel_ref.content.controls[1]
+            if isinstance(row, ft.ResponsiveRow):
+                for card in row.controls:
+                    if isinstance(card, ft.Container):
+                        card.height = 465 if is_raster else 360
+        request_ui_refresh(force=True)
+
     async def choose_training_dataset(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
         files = await ft.FilePicker().pick_files(
-            dialog_title="Select one or more training CSV files",
+            dialog_title="Select one training CSV or multiband TIFF",
             initial_directory=_training_picker_initial_directory(),
             file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["csv"],
-            allow_multiple=True,
+            allowed_extensions=["csv", "tif", "tiff"],
+            allow_multiple=False,
         )
         if not files:
             return
-
-        new_csvs = sorted(
-            {
-                str(Path(file_item.path).resolve())
-                for file_item in files
-                if file_item.path and file_item.path.lower().endswith(".csv")
-            }
-        )
-        if not new_csvs:
-            show_error("train", "No valid CSV file was selected.")
+        selected_path = Path(files[0].path).resolve()
+        suffix = selected_path.suffix.lower()
+        if suffix not in {".csv", ".tif", ".tiff"} or not selected_path.is_file():
+            show_error("train", "Choose an existing CSV or TIFF file.")
             return
-
-        added_count = 0
-        for csv_path in new_csvs:
-            if csv_path not in selected_training_csv_files:
-                selected_training_csv_files.append(csv_path)
-                added_count += 1
-
-        _rebuild_training_csv_selection()
-        _update_training_source_field()
-        push_train_status(
-            f"Added {added_count} CSV file(s). "
-            f"Dataset now contains {len(selected_training_csvs)} CSV file(s) from "
-            f"{len(selected_training_csv_files)} file selection(s) and "
-            f"{len(selected_training_csv_folders)} folder selection(s)."
-        )
+        selected_training_csv_files.clear()
+        selected_training_csv_folders.clear()
+        selected_training_csvs.clear()
+        training_source_field.value = str(selected_path)
+        training_raster_field.value = str(selected_path) if suffix in {".tif", ".tiff"} else ""
+        training_polygon_field.value = ""
+        training_label_field.options = []
+        training_label_field.value = None
+        if suffix == ".csv":
+            selected_training_csv_files.append(str(selected_path))
+            selected_training_csvs.append(str(selected_path))
+            training_mode_dropdown.value = (
+                DEFAULT_FEATURE_MODE
+                if training_sensor_dropdown.value == SENTINEL_2
+                else FEATURE_MODE_GENERIC_RASTER
+            )
+            push_train_status(f"Training CSV selected: {selected_path.name}")
+        else:
+            training_mode_dropdown.value = FEATURE_MODE_GENERIC_RASTER
+            push_train_status(f"Training raster selected: {selected_path.name}. Choose labelled polygons next.")
+        sync_training_input_ui()
 
     async def choose_training_raster(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4562,6 +4687,9 @@ def main(page: ft.Page) -> None:
     async def choose_training_polygons(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
+        if not (training_raster_field.value or "").strip():
+            show_error("train", "Choose a training TIFF before selecting polygons.")
+            return
         files = await ft.FilePicker().pick_files(
             dialog_title="Select labelled training polygons",
             file_type=ft.FilePickerFileType.CUSTOM,
@@ -4569,8 +4697,17 @@ def main(page: ft.Page) -> None:
             allow_multiple=False,
         )
         if files:
-            training_polygon_field.value = str(Path(files[0].path).resolve())
-            push_train_status(f"Training polygons selected: {Path(files[0].path).name}")
+            polygon_path = Path(files[0].path).resolve()
+            try:
+                columns = await asyncio.to_thread(polygon_attribute_columns, str(polygon_path))
+            except Exception as exc:
+                show_error("train", f"Could not read polygon attributes: {exc}")
+                return
+            training_polygon_field.value = str(polygon_path)
+            training_label_field.options = [ft.dropdown.Option(key=name, text=name) for name in columns]
+            training_label_field.value = None
+            push_train_status(f"Select the class column from {polygon_path.name}.")
+            sync_training_input_ui()
 
     async def choose_training_dataset_folder(_: ft.ControlEvent) -> None:
         if state["busy"]:
@@ -4611,9 +4748,12 @@ def main(page: ft.Page) -> None:
         selected_training_csv_files.clear()
         selected_training_csv_folders.clear()
         selected_training_csvs.clear()
+        training_source_field.value = ""
         training_raster_field.value = ""
         training_polygon_field.value = ""
-        _update_training_source_field()
+        training_label_field.options = []
+        training_label_field.value = None
+        sync_training_input_ui()
         push_train_status("Cleared training dataset selection.")
 
     async def choose_training_output_dir(_: ft.ControlEvent) -> None:
@@ -4668,6 +4808,9 @@ def main(page: ft.Page) -> None:
     async def choose_validation_model_file(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
+        if not (validation_sensor_dropdown.value or "").strip():
+            show_error("validation", "Choose a sensor before selecting a model.")
+            return
         files = await ft.FilePicker().pick_files(
             dialog_title="Select a trained model (.pkl)",
             initial_directory=_resolve_initial_directory(
@@ -4685,6 +4828,9 @@ def main(page: ft.Page) -> None:
         selected_path = Path(files[0].path)
         if selected_path.suffix.lower() != ".pkl":
             show_error("validation", "Please select a .pkl model file.")
+            return
+        if model_sensor(default_models_dir, selected_path) != validation_sensor_dropdown.value:
+            show_error("validation", "This model is not associated with the selected sensor.")
             return
 
         validation_external_model_field.value = str(selected_path)
@@ -4859,6 +5005,9 @@ def main(page: ft.Page) -> None:
     async def run_apply(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
+        if not (apply_sensor_dropdown.value or "").strip():
+            show_error("apply", "Choose a sensor before selecting a model.")
+            return
         if not apply_safe_field.value.strip():
             show_error(
                 "apply",
@@ -4871,6 +5020,9 @@ def main(page: ft.Page) -> None:
         selected_model = (apply_model_dropdown.value or "").strip()
         if not selected_model:
             show_error("apply", "Choose a model from the dropdown before running.")
+            return
+        if model_sensor(default_models_dir, Path(selected_model)) != apply_sensor_dropdown.value:
+            show_error("apply", "The selected model does not belong to this sensor.")
             return
 
         input_source = apply_safe_field.value.strip()
@@ -5349,17 +5501,31 @@ def main(page: ft.Page) -> None:
     async def run_training(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
-        if not selected_training_csvs and not (training_raster_field.value or "").strip():
-            show_error(
-                "train",
-                "Choose training CSV files or a raster with labelled polygons before training.",
-            )
+        selected_sensor = (training_sensor_dropdown.value or "").strip()
+        if selected_sensor not in available_sensors:
+            show_error("train", "Select or create a sensor before training a model.")
             return
-        if bool((training_raster_field.value or "").strip()) != bool((training_polygon_field.value or "").strip()):
-            show_error("train", "Choose both a training raster and labelled polygons.")
+        input_path = (training_source_field.value or "").strip()
+        if not input_path:
+            show_error("train", "Choose a training CSV or TIFF before training.")
+            return
+        if not Path(input_path).is_file():
+            show_error("train", "The selected training input no longer exists.")
+            return
+        if (training_raster_field.value or "").strip() and not (training_polygon_field.value or "").strip():
+            show_error("train", "Choose labelled polygons for the training TIFF.")
+            return
+        if (training_raster_field.value or "").strip() and not (training_label_field.value or "").strip():
+            show_error("train", "Choose the polygon class column.")
             return
         if not training_model_name_field.value.strip():
             show_error("train", "Provide a filename for the exported model.")
+            return
+        if Path(training_model_name_field.value.strip()).name != training_model_name_field.value.strip():
+            show_error("train", "Enter a model filename without a folder path.")
+            return
+        if not (training_output_dir_field.value or "").strip():
+            show_error("train", "Choose a model output folder.")
             return
 
         output_model = build_training_output_path()
@@ -5450,6 +5616,8 @@ def main(page: ft.Page) -> None:
                 raster_path=(training_raster_field.value or "").strip() or None,
                 polygon_path=(training_polygon_field.value or "").strip() or None,
                 label_column=(training_label_field.value or "").strip(),
+                sensor_name=selected_sensor,
+                sensor_registry_dir=str(default_models_dir),
             )
             training_result = result
             accuracy = result.get("accuracy")
@@ -5542,6 +5710,9 @@ def main(page: ft.Page) -> None:
     async def run_validation(_: ft.ControlEvent) -> None:
         if state["busy"]:
             return
+        if not (validation_sensor_dropdown.value or "").strip():
+            show_error("validation", "Choose a sensor before selecting a model.")
+            return
 
         dataset_path = validation_dataset_field.value.strip()
         if not dataset_path:
@@ -5555,6 +5726,9 @@ def main(page: ft.Page) -> None:
         model_path = resolve_validation_model_path()
         if not model_path:
             show_error("validation", "Choose a model from the dropdown or external picker before running.")
+            return
+        if model_sensor(default_models_dir, Path(model_path)) != validation_sensor_dropdown.value:
+            show_error("validation", "The selected model does not belong to this sensor.")
             return
 
         label_column = (validation_label_column_field.value or "").strip()
@@ -5744,7 +5918,7 @@ def main(page: ft.Page) -> None:
     )
 
     train_source_button = ft.ElevatedButton(
-        "Select CSV(s)",
+        "Select CSV or TIFF",
         icon=ft.Icons.INSERT_DRIVE_FILE,
         on_click=choose_training_dataset,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
@@ -5763,12 +5937,19 @@ def main(page: ft.Page) -> None:
         on_click=clear_training_dataset_selection,
         style=_frosted_button_style("#FFE8E8", "#6A2A2A"),
     )
+    train_output_folder_button = ft.ElevatedButton(
+        "Select Output Folder",
+        icon=ft.Icons.FOLDER_OPEN,
+        on_click=choose_training_output_dir,
+        style=_frosted_button_style("#E6F4FF", "#14324C"),
+    )
     train_run_button = ft.ElevatedButton(
         "Train Model",
         icon=ft.Icons.AUTO_GRAPH,
         on_click=run_training,
         style=_frosted_button_style("#DCE9FF", "#102A56"),
-        tooltip="Run training (Ctrl+Enter on Train tab)",
+        tooltip="Choose a sensor before training.",
+        disabled=True,
     )
     validation_dataset_button = ft.ElevatedButton(
         "Select Dataset",
@@ -5788,6 +5969,7 @@ def main(page: ft.Page) -> None:
         icon=ft.Icons.UPLOAD_FILE,
         on_click=choose_validation_model_file,
         style=_frosted_button_style("#E6F4FF", "#14324C"),
+        disabled=True,
     )
     validation_output_button = ft.ElevatedButton(
         "Select Output Folder",
@@ -5816,6 +5998,7 @@ def main(page: ft.Page) -> None:
         apply_mask_button,
         apply_clear_mask_button,
         apply_output_folder_button,
+        apply_sensor_dropdown,
         apply_model_dropdown,
         apply_salt_pepper_cleanup_checkbox,
         apply_run_button,
@@ -5824,8 +6007,11 @@ def main(page: ft.Page) -> None:
         train_polygon_button,
         train_source_folder_button,
         train_source_clear_button,
+        train_output_folder_button,
         train_run_button,
         training_model_name_field,
+        training_sensor_dropdown,
+        training_label_field,
         training_epochs_field,
         training_split_field,
         training_mode_dropdown,
@@ -5837,6 +6023,7 @@ def main(page: ft.Page) -> None:
         validation_external_model_button,
         validation_output_button,
         validation_model_dropdown,
+        validation_sensor_dropdown,
         validation_label_column_field,
         validation_mode_dropdown,
         validation_target_class_field,
@@ -5844,8 +6031,11 @@ def main(page: ft.Page) -> None:
         history_refresh_button,
     ]
     apply_model_dropdown.on_select = on_apply_model_select
+    apply_sensor_dropdown.on_select = lambda _: on_sensor_select(apply_sensor_dropdown)
     apply_salt_pepper_cleanup_checkbox.on_change = on_apply_salt_pepper_cleanup_toggle
     validation_model_dropdown.on_select = on_validation_model_select
+    validation_sensor_dropdown.on_select = lambda _: on_sensor_select(validation_sensor_dropdown)
+    training_sensor_dropdown.on_select = lambda _: on_sensor_select(training_sensor_dropdown)
     validation_label_column_field.on_submit = on_validation_label_column_change
     validation_mode_dropdown.on_select = on_validation_mode_select
     validation_target_class_field.on_submit = on_validation_target_class_change
@@ -5867,11 +6057,11 @@ def main(page: ft.Page) -> None:
     )
     train_intro_panel = _workflow_intro_panel(
         "Train a Model",
-        "Build a model from CSV data or a multiband raster with labelled polygons.",
+        "Train from one CSV or a multiband TIFF with labelled polygons.",
         [
-            "Select CSV files or a raster with labelled polygons",
-            "Set output model name",
-            "Set method, mode, epochs, and validation split",
+            "Select a CSV or TIFF input",
+            "For TIFF, select polygons and their class column",
+            "Choose the sensor, model name, and output folder",
             "Train and review final accuracy",
         ],
     )
@@ -5886,6 +6076,7 @@ def main(page: ft.Page) -> None:
         ],
     )
     train_paths_panel_ref: ft.Container | None = None
+    training_polygon_section: ft.Container | None = None
     train_settings_panel_ref: ft.Container | None = None
     train_main_content_ref: ft.Container | None = None
     validation_paths_panel_ref: ft.Container | None = None
@@ -6049,10 +6240,11 @@ def main(page: ft.Page) -> None:
                     weight=ft.FontWeight.W_600,
                     color=LIQUID_TEXT,
                 ),
+                apply_sensor_dropdown,
                 apply_model_dropdown,
                 apply_salt_pepper_cleanup_checkbox,
                 ft.Text(
-                    "Choose a model from the models folder. Leave the checkbox on to smooth small salt-and-pepper patches in post-processing.",
+                    "Choose a sensor, then its model. Leave the checkbox on to smooth small salt-and-pepper patches in post-processing.",
                     size=11,
                     color=LIQUID_MUTED,
                 ),
@@ -6133,7 +6325,7 @@ def main(page: ft.Page) -> None:
     )
 
     train_bottom_cards_height = 190
-    train_paths_card_height = 570
+    train_paths_card_height = 360
     train_progress_card_body = ft.Container(
         height=train_bottom_cards_height,
         content=ft.Column(
@@ -6176,10 +6368,23 @@ def main(page: ft.Page) -> None:
     history_view_initialized = {"value": False}
 
     def _build_train_view() -> ft.Control:
-        nonlocal train_main_content_ref, train_paths_panel_ref, train_settings_panel_ref
+        nonlocal train_main_content_ref, train_paths_panel_ref, train_settings_panel_ref, training_polygon_section
         cached_view = lazy_tab_view_cache.get("train")
         if cached_view is not None:
             return cached_view
+
+        training_polygon_section = ft.Container(
+            visible=False,
+            content=ft.Column(
+                spacing=8,
+                controls=[
+                    training_polygon_field,
+                    train_polygon_button,
+                    training_label_field,
+                    ft.Text("Choose the polygon attribute containing the class of each feature.", size=11, color=LIQUID_MUTED),
+                ],
+            ),
+        )
 
         train_paths_panel = _glass_panel(
             padding=18,
@@ -6209,7 +6414,7 @@ def main(page: ft.Page) -> None:
                                     spacing=10,
                                     controls=[
                                         ft.Text(
-                                            "Training Dataset (CSV)",
+                                            "Input Data",
                                             size=14,
                                             weight=ft.FontWeight.W_600,
                                             color=LIQUID_TEXT,
@@ -6220,18 +6425,12 @@ def main(page: ft.Page) -> None:
                                             spacing=8,
                                             controls=[
                                                 train_source_button,
-                                                train_source_folder_button,
                                                 train_source_clear_button,
                                             ],
                                         ),
-                                        training_raster_field,
-                                        train_raster_button,
-                                        training_polygon_field,
-                                        train_polygon_button,
-                                        training_label_field,
-                                        ft.Container(expand=True),
+                                        training_polygon_section,
                                         ft.Text(
-                                            "Add CSVs or select a multiband raster and labelled polygons. The class column may contain names or numbers.",
+                                            "CSV: True_Class supplies labels. TIFF: choose polygons and their class column.",
                                             size=11,
                                             color=LIQUID_MUTED,
                                         ),
@@ -6256,10 +6455,11 @@ def main(page: ft.Page) -> None:
                                             color=LIQUID_TEXT,
                                         ),
                                         training_output_dir_field,
+                                        train_output_folder_button,
+                                        training_sensor_dropdown,
                                         training_model_name_field,
-                                        ft.Container(expand=True),
                                         ft.Text(
-                                            "New models are always saved to the default models folder with the filename shown above.",
+                                            "The trained model is saved in the selected folder.",
                                             size=11,
                                             color=LIQUID_MUTED,
                                         ),
@@ -6283,6 +6483,7 @@ def main(page: ft.Page) -> None:
                     train_intro_panel,
                     train_paths_panel,
                     ft.Container(
+                        visible=False,
                         padding=ft.padding.symmetric(horizontal=18, vertical=16),
                         border_radius=22,
                         bgcolor=ft.Colors.with_opacity(0.62, LIQUID_SURFACE_ALT),
@@ -6550,6 +6751,7 @@ def main(page: ft.Page) -> None:
                                             weight=ft.FontWeight.W_600,
                                             color=LIQUID_TEXT,
                                         ),
+                                        validation_sensor_dropdown,
                                         validation_model_dropdown,
                                         validation_external_model_field,
                                         ft.Row(
@@ -7709,7 +7911,7 @@ def main(page: ft.Page) -> None:
                 if len(train_paths_panel_ref.content.controls) >= 2:
                     responsive_row = train_paths_panel_ref.content.controls[1]
                     if isinstance(responsive_row, ft.ResponsiveRow):
-                        train_paths_card_height_dynamic = 570
+                        train_paths_card_height_dynamic = 465 if training_raster_field.value else 360
                         for card in responsive_row.controls:
                             if isinstance(card, ft.Container):
                                 card.height = train_paths_card_height_dynamic
