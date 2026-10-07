@@ -6,6 +6,7 @@
 
 - Desktop builds now bundle only the models selected in `templates/packaged_models.txt`; repository runs continue to expose every local model
 - Build and installer checks now require the bundled models to match the deployment selection exactly
+- Registered `ML_Kappa_P4M_test` with the built-in Phantom 4 Multispectral sensor on fresh installations and upgrades
 - Rebuilt the desktop bundle and installer for version `1.0.28`
 
 ## Version 1.0.27 - 2026-09-22

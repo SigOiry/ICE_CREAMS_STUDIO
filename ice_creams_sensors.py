@@ -8,12 +8,30 @@ import os
 from pathlib import Path
 
 SENTINEL_2 = "Sentinel-2"
+PHANTOM_4_MULTISPECTRAL = "Phantom 4 Multispectral"
 # Sentinel-2A MSI centres (nm), in the application's spectral band order:
 # https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/S2L2A.html
 SENTINEL_2_BANDS = {
     "B01": 442.7, "B02": 492.4, "B03": 559.8, "B04": 664.6,
     "B05": 704.1, "B06": 740.5, "B07": 782.8, "B08": 832.8,
     "B8A": 864.7, "B09": 945.1, "B11": 1613.7, "B12": 2202.4,
+}
+PHANTOM_4_MULTISPECTRAL_BANDS = {
+    "Band_1": 450.0,
+    "Band_2": 560.0,
+    "Band_3": 650.0,
+    "Band_4": 730.0,
+    "Band_5": 840.0,
+}
+
+# Packaged models must keep their intended sensors when a user installs the app
+# for the first time or upgrades with an existing registry in APPDATA.
+PACKAGED_MODEL_SENSORS = {
+    "ICECREAMS_V1.1.0.pkl": SENTINEL_2,
+    "ICECREAMS_V1.2.0.pkl": SENTINEL_2,
+    "ICECREAMS_V1.3.0.pkl": SENTINEL_2,
+    "ICECREAMS_V1.3.0_ACOLITE.pkl": SENTINEL_2,
+    "ML_Kappa_P4M_test.pkl": PHANTOM_4_MULTISPECTRAL,
 }
 
 
@@ -52,7 +70,13 @@ def _registry_dir(models_dir: Path) -> Path:
 
 def load_sensors(models_dir: Path) -> dict[str, dict]:
     custom = _read_json(sensor_registry_path(models_dir))
-    sensors = {SENTINEL_2: {"name": SENTINEL_2, "bands": SENTINEL_2_BANDS.copy()}}
+    sensors = {
+        SENTINEL_2: {"name": SENTINEL_2, "bands": SENTINEL_2_BANDS.copy()},
+        PHANTOM_4_MULTISPECTRAL: {
+            "name": PHANTOM_4_MULTISPECTRAL,
+            "bands": PHANTOM_4_MULTISPECTRAL_BANDS.copy(),
+        },
+    }
     for name, definition in custom.items():
         sensors[name] = validate_sensor(name, definition.get("bands", {}))
     return sensors
@@ -110,16 +134,27 @@ def assign_model_sensor(models_dir: Path, model_path: Path, sensor_name: str) ->
 
 
 def bootstrap_existing_models(models_dir: Path) -> dict[str, str]:
-    """Associate legacy models with Sentinel-2 once; leave later imports unassigned."""
+    """Initialize legacy assignments and enforce packaged-model sensor mappings."""
     registry = model_registry_path(models_dir)
-    if not registry.exists():
+    registry_exists = registry.exists()
+    if registry_exists:
+        mapping = load_model_sensors(models_dir)
+    else:
         mapping = {
             _model_key(path, models_dir): SENTINEL_2
             for path in models_dir.rglob("*.pkl")
         } if models_dir.exists() else {}
+
+    original_mapping = mapping.copy()
+    if models_dir.exists():
+        for path in models_dir.rglob("*.pkl"):
+            packaged_sensor = PACKAGED_MODEL_SENSORS.get(path.name)
+            if packaged_sensor is not None:
+                mapping[_model_key(path, models_dir)] = packaged_sensor
+
+    if not registry_exists or mapping != original_mapping:
         _write_json(registry, mapping)
-        return mapping
-    return load_model_sensors(models_dir)
+    return mapping
 
 
 def model_sensor(models_dir: Path, model_path: Path) -> str | None:

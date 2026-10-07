@@ -50,6 +50,7 @@ was bundled.
 - Select the models deployed in the desktop app through `templates/packaged_models.txt`
 - Keep every local model available when running ICE CREAMS Studio from the repository
 - Ship only the five approved models in the Windows desktop bundle and installer
+- Register `ML_Kappa_P4M_test` with the Phantom 4 Multispectral sensor automatically
 - Reject builds whose bundled model set differs from the deployment selection
 - Rebuilt the Windows desktop installer for version `1.0.28`
 

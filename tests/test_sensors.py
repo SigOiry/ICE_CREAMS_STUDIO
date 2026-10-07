@@ -11,6 +11,8 @@ from ice_creams_generic_raster import (
     prepare_generic_features,
 )
 from ice_creams_sensors import (
+    PHANTOM_4_MULTISPECTRAL,
+    PHANTOM_4_MULTISPECTRAL_BANDS,
     SENTINEL_2,
     assign_model_sensor,
     bootstrap_existing_models,
@@ -34,6 +36,24 @@ def test_sensor_registry_associates_legacy_and_new_models(tmp_path):
     assert model_sensor(tmp_path, new_model) == "Drone RGB-NIR"
     with pytest.raises(ValueError, match="already exists"):
         create_sensor(tmp_path, "drone rgb-nir", [490])
+
+
+def test_packaged_p4m_model_uses_phantom_4_multispectral_on_install_and_upgrade(tmp_path):
+    p4m_model = tmp_path / "ML_Kappa_P4M_test.pkl"
+    p4m_model.touch()
+
+    mapping = bootstrap_existing_models(tmp_path)
+    assert mapping[p4m_model.name] == PHANTOM_4_MULTISPECTRAL
+    assert model_sensor(tmp_path, p4m_model) == PHANTOM_4_MULTISPECTRAL
+    assert load_sensors(tmp_path)[PHANTOM_4_MULTISPECTRAL] == {
+        "name": PHANTOM_4_MULTISPECTRAL,
+        "bands": PHANTOM_4_MULTISPECTRAL_BANDS,
+    }
+
+    # Repair the stale Sentinel-2 assignment that an older installation could
+    # have persisted before this packaged-model mapping was introduced.
+    assign_model_sensor(tmp_path, p4m_model, SENTINEL_2)
+    assert bootstrap_existing_models(tmp_path)[p4m_model.name] == PHANTOM_4_MULTISPECTRAL
 
 
 def test_custom_wavelengths_build_ndvi_and_ndwi_for_generic_raster(tmp_path):
