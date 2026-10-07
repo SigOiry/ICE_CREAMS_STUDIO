@@ -1,5 +1,13 @@
 # Patch Notes
 
+## Version 1.0.28 - 2026-10-07
+
+### Changed
+
+- Desktop builds now bundle only the models selected in `templates/packaged_models.txt`; repository runs continue to expose every local model
+- Build and installer checks now require the bundled models to match the deployment selection exactly
+- Rebuilt the desktop bundle and installer for version `1.0.28`
+
 ## Version 1.0.27 - 2026-09-22
 
 ### Changed

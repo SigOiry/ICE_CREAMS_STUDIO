@@ -5,6 +5,7 @@ $appDisplayName = "ICE CREAMS Studio"
 $distRoot = ".\dist\$appName"
 $distExe = "$distRoot\$appName.exe"
 $issScript = ".\templates\ice_creams_installer.iss"
+$packagedModelsManifest = ".\templates\packaged_models.txt"
 $envLibprotobufCandidates = @(
   (Join-Path $env:USERPROFILE "miniconda3\envs\ICE_CREAMS\Library\bin\libprotobuf.dll"),
   (Join-Path $env:USERPROFILE "anaconda3\envs\ICE_CREAMS\Library\bin\libprotobuf.dll")
@@ -19,16 +20,46 @@ if (!(Test-Path $distExe)) {
 if (!(Test-Path ".\models")) {
   throw "Missing source models folder .\models"
 }
-$sourceModels = Get-ChildItem -Path ".\models" -Filter "*.pkl" -File -ErrorAction SilentlyContinue
+if (!(Test-Path $packagedModelsManifest)) {
+  throw "Missing packaged-model manifest: $packagedModelsManifest"
+}
+$packagedModelNames = @(
+  Get-Content $packagedModelsManifest `
+    | ForEach-Object { $_.Trim() } `
+    | Where-Object { $_ -and -not $_.StartsWith("#") }
+)
+$invalidPackagedModelNames = @(
+  $packagedModelNames | Where-Object {
+    [System.IO.Path]::GetFileName($_) -ne $_ -or [System.IO.Path]::GetExtension($_) -ne ".pkl"
+  }
+)
+$duplicatePackagedModelNames = @(
+  $packagedModelNames | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name
+)
+$missingPackagedModelNames = @(
+  $packagedModelNames | Where-Object { -not (Test-Path -LiteralPath (Join-Path ".\models" $_) -PathType Leaf) }
+)
 $bundledModels = Get-ChildItem -Path "$distRoot\_internal\models" -Filter "*.pkl" -File -ErrorAction SilentlyContinue
-if (-not $sourceModels -or $sourceModels.Count -lt 1) {
-  throw "No source model files (*.pkl) found in .\models"
+if ($packagedModelNames.Count -lt 1) {
+  throw "No models are selected in $packagedModelsManifest"
+}
+if ($invalidPackagedModelNames.Count -gt 0) {
+  throw "Packaged model entries must be .pkl filenames without paths: $($invalidPackagedModelNames -join ', ')"
+}
+if ($duplicatePackagedModelNames.Count -gt 0) {
+  throw "Duplicate entries in ${packagedModelsManifest}: $($duplicatePackagedModelNames -join ', ')"
+}
+if ($missingPackagedModelNames.Count -gt 0) {
+  throw "Selected packaged models are missing from .\models: $($missingPackagedModelNames -join ', ')"
 }
 if (-not $bundledModels -or $bundledModels.Count -lt 1) {
   throw "No bundled model files (*.pkl) found in $distRoot\_internal\models"
 }
-if ($bundledModels.Count -lt $sourceModels.Count) {
-  throw "Bundled model count ($($bundledModels.Count)) is lower than source model count ($($sourceModels.Count)). Rebuild with templates\compiles_app.txt"
+$bundledModelNames = @($bundledModels | ForEach-Object Name)
+$unexpectedBundledModels = @(Compare-Object $packagedModelNames $bundledModelNames)
+if ($unexpectedBundledModels.Count -gt 0) {
+  $differences = $unexpectedBundledModels | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }
+  throw "Bundled models do not exactly match ${packagedModelsManifest}: $($differences -join ', '). Rebuild with templates\compiles_app.txt"
 }
 if (!(Test-Path "$distRoot\_internal\about\Info.txt")) {
   throw "Missing about assets in $distRoot\_internal\about. Rebuild with templates\compiles_app.txt"
@@ -99,4 +130,5 @@ if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed with exit code $L
 
 Write-Host "Installer compilation complete."
 Write-Host "Expected output: .\templates\Output\ICE_CREAMS_Installer_$($appVersion.Replace('.', '_')).exe"
+Write-Host "Bundled models verified: $($bundledModels.Count) model(s)"
 Write-Host "Bundled validation tables verified: $($bundledValidationTables.Count) table(s)"

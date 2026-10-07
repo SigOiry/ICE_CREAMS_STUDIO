@@ -80,7 +80,7 @@ except Exception:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_VERSION = "1.0.27"
+APP_VERSION = "1.0.28"
 UPDATE_REPO_OWNER = "SigOiry"
 UPDATE_REPO_NAME = "ICE_CREAMS_STUDIO"
 UPDATE_REPO_BRANCH = "main"

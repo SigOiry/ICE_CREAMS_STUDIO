@@ -1,0 +1,7 @@
+# One model filename per line. Only these models are included in desktop builds.
+# Models not listed here remain available when running the app from the repository.
+ICECREAMS_V1.1.0.pkl
+ICECREAMS_V1.2.0.pkl
+ICECREAMS_V1.3.0.pkl
+ICECREAMS_V1.3.0_ACOLITE.pkl
+ML_Kappa_P4M_test.pkl

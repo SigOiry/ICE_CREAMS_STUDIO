@@ -23,7 +23,7 @@ The desktop application is distributed from the hosted UI repository:
 To install the app:
 
 - download the Windows installer directly here:
-  [`ICE_CREAMS_Installer_1_0_27.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_27.exe)
+  [`ICE_CREAMS_Installer_1_0_28.exe`](https://github.com/SigOiry/ICE_CREAMS_STUDIO/raw/main/templates/Output/ICE_CREAMS_Installer_1_0_28.exe)
 - run the installer on Windows
 - launch **ICE CREAMS Studio** from the desktop shortcut or Start menu
   after installation
@@ -35,14 +35,22 @@ application.
 Patch notes for the current desktop release are available in
 [`PATCHNOTES.md`](PATCHNOTES.md).
 
-## What's New in 1.0.27
+### Selecting models for the packaged app
 
-- Choose a sensor before training, applying, or validating a model; create new sensors with band centre wavelengths
-- Train from a CSV or a multiband GeoTIFF with labelled polygons and a chosen class column
-- Use sensor wavelengths to add NDVI and NDWI when the required bands are available
-- Apply generic raster models faster with larger inference windows and direct tabular prediction
-- Validation accepts a CSV or a raw multiband TIFF with a labelled point or polygon shapefile
-- Rebuilt the Windows desktop installer for version `1.0.27`
+Running ICE CREAMS Studio from the repository exposes every `.pkl` file in the
+`models` folder. Desktop builds and installers bundle only the models listed in
+`templates/packaged_models.txt`. Edit that manifest before running
+`templates/compiles_app.txt` to change the models deployed to end users; the
+build stops if a selected model is missing and verifies that no unlisted model
+was bundled.
+
+## What's New in 1.0.28
+
+- Select the models deployed in the desktop app through `templates/packaged_models.txt`
+- Keep every local model available when running ICE CREAMS Studio from the repository
+- Ship only the five approved models in the Windows desktop bundle and installer
+- Reject builds whose bundled model set differs from the deployment selection
+- Rebuilt the Windows desktop installer for version `1.0.28`
 
 ## Current App Features
 
