@@ -184,6 +184,10 @@ from ice_creams_model_families import (
     prepare_sequence_feature_dataframe,
     spectral_cnn_sequence_input_label,
 )
+from ice_creams_raster_style import (
+    ICE_CREAMS_CLASS_STYLE,
+    apply_classification_style,
+)
 from ice_creams_specialist_models import (
     SPECIALIST_RAW_BANDS,
     extract_class45_specialist_metadata,
@@ -207,17 +211,6 @@ CLASSES_NUMBER_ID_DICT = {
     6: "Phaeophyceae",
     7: "Florideophyceae",
     8: "Water",
-}
-
-OUT_CLASS_QGIS_STYLE: dict[int, tuple[str, str]] = {
-    1: ("Bare Sediment", "#3e3d1b"),
-    2: ("Sand", "#3e3d1b"),
-    3: ("Chlorophyceae", "#99ff13"),
-    4: ("Magnoliopsida", "#09861a"),
-    5: ("Bacillariophyceae", "#ff9e36"),
-    6: ("Phaeophyceae", "#a40205"),
-    7: ("Florideophyceae", "#ff0004"),
-    8: ("Water", "#3d2fff"),
 }
 
 DEFAULT_DASK_WORKERS = max(1, os.cpu_count() or 1)
@@ -703,58 +696,23 @@ def _open_multiband_raster(
     return clipped_raster
 
 
-def _hex_to_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
-    """Convert #RRGGBB color to an RGBA tuple."""
-    color_value = hex_color.strip().lstrip("#")
-    if len(color_value) != 6:
-        raise ValueError(f"Expected #RRGGBB color, got: {hex_color}")
-    red = int(color_value[0:2], 16)
-    green = int(color_value[2:4], 16)
-    blue = int(color_value[4:6], 16)
-    return (red, green, blue, alpha)
-
-
 def _apply_out_class_qgis_style(
     output_gtiff: str,
     status_callback: Callable[[str], None] | None = None,
 ) -> None:
     """
-    Attach class colors and labels to the Out_Class band for QGIS rendering.
-
-    This updates only band 1, which is Out_Class in non-debug exports.
+    Embed class colors and labels and write an older-QGIS QML fallback.
     """
-    band_index = 1
-    category_names = ["NoData"] + [
-        OUT_CLASS_QGIS_STYLE[class_id][0]
-        for class_id in sorted(OUT_CLASS_QGIS_STYLE)
-    ]
-    colormap = {0: (0, 0, 0, 0)}
-    for class_id, (_, hex_color) in OUT_CLASS_QGIS_STYLE.items():
-        colormap[class_id] = _hex_to_rgba(hex_color)
-
-    style_tags = {
-        "CLASS_SCHEMA": "ICE_CREAMS_Out_Class_v1",
-        "CLASS_COUNT": str(len(OUT_CLASS_QGIS_STYLE)),
-        "CATEGORY_NAMES": "|".join(category_names),
-    }
-    for class_id, (class_name, hex_color) in OUT_CLASS_QGIS_STYLE.items():
-        style_tags[f"CLASS_{class_id}"] = class_name
-        style_tags[f"CLASS_{class_id}_COLOR"] = hex_color
-
     try:
-        with rasterio.open(output_gtiff, "r+", IGNORE_COG_LAYOUT_BREAK="YES") as out_raster:
-            if out_raster.count < band_index:
-                return
-            out_raster.set_band_description(band_index, "Out_Class")
-            out_raster.write_colormap(band_index, colormap)
-            out_raster.update_tags(band_index, **style_tags)
-            if out_raster.count >= 2:
-                out_raster.set_band_description(2, "Class_Probs")
-            if out_raster.count >= 3:
-                out_raster.set_band_description(3, "Seagrass_Cover")
-            if out_raster.count >= 4:
-                out_raster.set_band_description(4, "NDVI")
-        _emit_status(status_callback, "Applied QGIS class colors and labels to Out_Class band")
+        sidecar = apply_classification_style(
+            output_gtiff,
+            ICE_CREAMS_CLASS_STYLE,
+            band_descriptions=("Out_Class", "Class_Probs", "Seagrass_Cover", "NDVI"),
+        )
+        _emit_status(
+            status_callback,
+            f"Attached QGIS class colors and labels (compatibility style: {sidecar.name})",
+        )
     except Exception as exc:  # noqa: BLE001 - styling should not fail the main workflow.
         _emit_status(
             status_callback,
@@ -2723,7 +2681,7 @@ def classify_s2_scene(
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
 
-            _emit_status(status_callback, f"Writing Cloud-Optimised GeoTIFF to {output_gtiff}")
+            _emit_status(status_callback, f"Writing classified GeoTIFF to {output_gtiff}")
             _emit_progress(progress_callback, 0.92)
             _console_log("Writing out", verbose_console)
             progress_context = ProgressBar() if verbose_console else nullcontext()
@@ -2734,10 +2692,13 @@ def classify_s2_scene(
                 ):
                     output_raster.rio.to_raster(
                         output_gtiff,
-                        driver="COG",
+                        driver="GTiff",
                         tiled=True,
                         windowed=True,
                         dtype=numpy.float32,
+                        compress="deflate",
+                        predictor=3,
+                        BIGTIFF="IF_SAFER",
                     )
 
             if not debug:

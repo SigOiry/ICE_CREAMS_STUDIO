@@ -16,6 +16,7 @@ from rasterio.features import rasterize
 from rasterio.windows import Window, bounds as window_bounds, from_bounds, transform as window_transform
 from shapely.geometry import box
 
+from ice_creams_raster_style import apply_classification_style, class_style_for_labels
 from ice_creams_sensors import index_band_names
 
 
@@ -316,4 +317,13 @@ def classify_generic_raster(
                     if status_callback and (completed_windows == total_windows or now - last_status_time >= 5):
                         status_callback(f"Classified {completed_windows}/{total_windows} raster windows")
                         last_status_time = now
+        style_sidecar = apply_classification_style(
+            output,
+            class_style_for_labels(vocab),
+            band_descriptions=("Predicted_Class_ID", "Predicted_Confidence"),
+        )
+        if status_callback:
+            status_callback(
+                f"Attached QGIS class colors and labels (compatibility style: {style_sidecar.name})"
+            )
     return str(output)

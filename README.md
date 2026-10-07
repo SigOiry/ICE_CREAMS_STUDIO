@@ -50,6 +50,8 @@ was bundled.
 - Keep every local model available when running ICE CREAMS Studio from the repository
 - Ship only the five approved models in the Windows desktop bundle and installer
 - Register `ML_Kappa_P4M_test` with the Phantom 4 Multispectral sensor automatically
+- Attach ICE CREAMS class colors and legend labels to every classified GeoTIFF
+- Write a matching QML compatibility style beside each output for older QGIS versions
 - Reject builds whose bundled model set differs from the deployment selection
 - Rebuilt the Windows desktop installer for version `1.0.28`
 
@@ -67,7 +69,9 @@ predictor and class columns or a multiband TIFF. A TIFF also requires a labelled
 point or polygon shapefile. Choose the class column from the CSV or shapefile,
 then use the matching button to pair its classes with model classes.
 
-Choose a sensor before training. Existing models are assigned to **Sentinel-2**.
+Choose a sensor before training. Existing ICE CREAMS models are assigned to
+**Sentinel-2**, except `ML_Kappa_P4M_test`, which is assigned to
+**Phantom 4 Multispectral**.
 For a new sensor, choose **Create new sensor**, enter its name, and provide the
 centre wavelength of each raster band in nanometres, in raster band order. The
 band count must match the training raster. Sensor definitions and model
@@ -84,7 +88,12 @@ schema, including the index band choices, so Apply and Validation recreate
 the same predictors. Choose the sensor first in Apply or Validation to see only
 its models. Apply can classify a compatible GeoTIFF with an optional polygon
 mask. The output GeoTIFF has class ID and confidence bands, with the ID-to-label
-mapping in its `CLASS_LABELS` metadata. Both tabular and spectral 1D CNN
+mapping in its `CLASS_LABELS` metadata. Each classified output also receives a
+GDAL raster attribute table containing class labels and RGBA colors so current
+QGIS versions render the legend automatically. Depending on the bundled GDAL
+version, the table is stored inside the TIFF or in its standard `.aux.xml`
+companion. A same-basename `.qml` file is written as a compatibility fallback
+for older QGIS versions. Both tabular and spectral 1D CNN
 methods are supported. Apply reads generic rasters in bounded inference
 windows independent of the TIFF's internal storage blocks, and skips windows
 outside an optional polygon mask.
